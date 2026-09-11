@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 
 from fastapi import status, HTTPException, Depends, APIRouter, Query
 from app import models, schemas
@@ -80,7 +81,7 @@ def get_posts(db: Session = Depends(get_db),
         db.query(models.Post, func.count(models.Vote.post_id).label("votes"))
         .join(models.Vote, models.Vote.post_id == models.Post.id, isouter=True)
         .group_by(models.Post.id)
-        .filter(models.Post.title.contains(search))
+        .filter(models.Post.published.is_(True), models.Post.title.contains(search))
         .limit(limit)
         .offset(skip)
         .all()
@@ -136,6 +137,21 @@ def create_reply(
         content=content,
     )
     db.add(new_reply)
+    db.flush()
+    notification_recipient = post.owner_id
+    notification_type = "NEW_REPLY"
+    if reply.parent_id is not None and parent is not None:
+        notification_recipient = parent.owner_id
+        notification_type = "NEW_REPLY_TO_REPLY"
+    if current_user.id != notification_recipient:
+        db.add(models.Notification(
+            recipient_id=notification_recipient,
+            actor_id=current_user.id,
+            type=notification_type,
+            entity_type="post_reply",
+            entity_id=new_reply.id,
+            payload=json.dumps({"post_id": post_id, "reply_id": new_reply.id}),
+        ))
     db.commit()
     db.refresh(new_reply)
     return new_reply

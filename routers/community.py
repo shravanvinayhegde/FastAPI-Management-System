@@ -189,11 +189,16 @@ def list_community_posts(
     vote_count = func.count(models.Vote.post_id)
     query = db.query(models.Post, vote_count.label("votes")).outerjoin(
         models.Vote, models.Vote.post_id == models.Post.id,
-    ).filter(models.Post.community_id == community_id).group_by(models.Post.id)
+    ).filter(
+        models.Post.community_id == community_id,
+        models.Post.published.is_(True),
+    ).group_by(models.Post.id)
     if sort == "top":
         query = query.order_by(vote_count.desc(), models.Post.created_at.desc(), models.Post.id.desc())
     elif sort == "hot":
-        query = query.order_by(vote_count.desc(), models.Post.created_at.desc(), models.Post.id.desc())
+        age_hours = func.extract("epoch", func.now() - models.Post.created_at) / 3600.0
+        hot_score = (vote_count + 1) / func.pow(age_hours + 2.0, 1.5)
+        query = query.order_by(hot_score.desc(), models.Post.created_at.desc(), models.Post.id.desc())
     else:
         query = query.order_by(models.Post.created_at.desc(), models.Post.id.desc())
     results = query.offset(skip).limit(limit).all()

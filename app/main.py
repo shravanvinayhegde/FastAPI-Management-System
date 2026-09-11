@@ -7,8 +7,9 @@ from app.config import settings
 from routers import auth, chat, community, notification, post, profile, user, vote
 
 app = FastAPI()
-Path("media/avatars").mkdir(parents=True, exist_ok=True)
-app.mount("/media", StaticFiles(directory="media"), name="media")
+settings.media_directory.mkdir(parents=True, exist_ok=True)
+(settings.media_directory / "avatars").mkdir(parents=True, exist_ok=True)
+app.mount("/media", StaticFiles(directory=str(settings.media_directory)), name="media")
 
 origins = settings.cors_origins_list
 app.add_middleware(
@@ -16,7 +17,7 @@ app.add_middleware(
     allow_origins=origins,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
+    allow_credentials=origins != ["*"],
 )
 
 

@@ -11,11 +11,12 @@ from sqlalchemy.orm import Session
 from PIL import Image, UnidentifiedImageError
 
 from app import models, schemas
+from app.config import settings
 from app.database import get_db
 from routers import oauth2
 
 router = APIRouter(prefix="/users", tags=["Profiles"])
-AVATAR_DIRECTORY = Path("media") / "avatars"
+AVATAR_DIRECTORY = settings.media_directory / "avatars"
 MAX_AVATAR_BYTES = 5 * 1024 * 1024
 MAX_AVATAR_DIMENSION = 4096
 ALLOWED_AVATAR_FORMATS = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}
@@ -182,8 +183,8 @@ def delete_avatar(
     current_user: models.User = Depends(oauth2.get_current_user),
 ):
     if current_user.avatar_type == "uploaded" and current_user.avatar_url:
-        path = Path(current_user.avatar_url.removeprefix("/"))
-        if path.is_file() and path.parent == AVATAR_DIRECTORY:
+        path = (AVATAR_DIRECTORY / Path(current_user.avatar_url).name).resolve()
+        if path.is_file() and path.parent == AVATAR_DIRECTORY.resolve():
             path.unlink()
     current_user.avatar_url = None
     current_user.avatar_type = "default"
@@ -197,7 +198,10 @@ def _profile_posts(db: Session, target: models.User, skip: int, limit: int):
         return []
     results = db.query(models.Post, func.count(models.Vote.post_id).label("votes")).outerjoin(
         models.Vote, models.Vote.post_id == models.Post.id,
-    ).filter(models.Post.owner_id == target.id).group_by(models.Post.id).order_by(
+    ).filter(
+        models.Post.owner_id == target.id,
+        models.Post.published.is_(True),
+    ).group_by(models.Post.id).order_by(
         models.Post.created_at.desc(), models.Post.id.desc(),
     ).offset(skip).limit(limit).all()
     return [{"Post": post, "votes": votes} for post, votes in results]

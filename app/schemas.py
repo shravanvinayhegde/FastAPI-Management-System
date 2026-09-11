@@ -215,3 +215,8 @@ class Vote(BaseModel):
     dir: conint(ge=0, le=1)   # type: ignore
 
 
+class VoteStatus(BaseModel):
+    voted: bool
+    vote_count: int
+
+

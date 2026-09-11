@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # - "http://localhost:3000,https://myapp.com"
     cors_origins: Optional[str] = None
 
+    # Use a mounted persistent volume in production. The public contract remains /media/...
+    media_directory: Path = Path("media")
+
     model_config = SettingsConfigDict(env_file=Path(__file__).parent.parent / ".env")
 
     @property

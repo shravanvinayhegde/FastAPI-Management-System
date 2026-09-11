@@ -120,6 +120,10 @@ access_token_expire_minutes=60
 
 # CORS
 cors_origins=*
+
+# Media storage
+# Set this to a persistent mounted volume in production.
+media_directory=media
 ```
 
 **5. Run database migrations:**
@@ -246,6 +250,7 @@ Posts may include optional `image_url` and `video_url` fields in addition to tex
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/vote/` | Upvote or remove your vote on a post |
+| `GET` | `/vote/{post_id}/status` | Get your vote state and the post vote count |
 
 > 🔐 Most endpoints require a valid JWT token in the `Authorization: Bearer <token>` header.
 >
