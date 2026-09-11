@@ -1,6 +1,6 @@
 import json
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, conint
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, conint, model_validator
 from datetime import datetime
 from typing import Optional
 
@@ -27,6 +27,14 @@ class UserOut(BaseModel):
     profile_visibility: Optional[str] = None
     show_posts: Optional[bool] = None
     show_communities: Optional[bool] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PostOwner(BaseModel):
+    id: int
+    username: str
+    display_name: str
+    avatar_url: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -125,8 +133,14 @@ class PostMediaOut(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    content: str = Field(min_length=1, max_length=2000)
+    content: str = Field(default="", max_length=2000)
     shared_post_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def require_content_or_share(self) -> "MessageCreate":
+        if not self.content.strip() and self.shared_post_id is None:
+            raise ValueError("Message must have text or a shared post")
+        return self
 
 
 class SharedPostPreview(BaseModel):
@@ -134,7 +148,7 @@ class SharedPostPreview(BaseModel):
     title: str
     content: str
     owner_id: int
-    owner: Optional[UserOut] = None
+    owner: Optional[PostOwner] = None
     media: list[PostMediaOut] = []
     community: Optional[CommunityOut] = None
     created_at: datetime
@@ -207,7 +221,7 @@ class ReplyOut(BaseModel):
     content: str
     created_at: datetime
     updated_at: datetime
-    owner: Optional[UserOut] = None
+    owner: Optional[PostOwner] = None
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -231,7 +245,7 @@ class Post(PostBase):
     id: int          
     created_at: datetime
     owner_id:int
-    owner:UserOut
+    owner:PostOwner
     media: list[PostMediaOut] = []
 
     model_config = ConfigDict(from_attributes=True)
@@ -245,7 +259,7 @@ class PostOut(BaseModel):
 class UserCreate(BaseModel):
     username: Optional[str] = Field(default=None, min_length=3, max_length=50, pattern="^[a-zA-Z0-9_]+$")
     email: str
-    password: str
+    password: str = Field(max_length=72, description="Must be at most 72 characters")
 
 class UserLogin(BaseModel):
     email: str
@@ -256,7 +270,7 @@ class Token(BaseModel):
     token_type: str
 
 class TokenData(BaseModel):
-    id: Optional[str] = None
+    id: Optional[int] = None
 
 
 class Vote(BaseModel):  

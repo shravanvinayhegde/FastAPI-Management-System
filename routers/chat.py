@@ -194,7 +194,7 @@ async def send_message(
 ):
     conversation = _require_member(db, conversation_id, current_user.id)
     content = payload.content.strip()
-    if not content:
+    if not content and payload.shared_post_id is None:
         raise HTTPException(status_code=422, detail="Message content cannot be blank")
     if payload.shared_post_id is not None and db.query(models.Post.id).filter(
         models.Post.id == payload.shared_post_id,
@@ -218,6 +218,7 @@ async def send_message(
         entity_type="conversation",
         entity_id=conversation_id,
         payload=json.dumps({
+            "message": f"{current_user.username} sent you a message",
             "conversation_id": conversation_id,
             "message_id": message.id,
             "actor_username": current_user.username,

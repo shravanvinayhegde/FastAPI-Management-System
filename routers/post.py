@@ -300,7 +300,11 @@ def create_reply(
             type=notification_type,
             entity_type="post_reply",
             entity_id=new_reply.id,
-            payload=json.dumps({"post_id": post_id, "reply_id": new_reply.id}),
+            payload=json.dumps({
+                "message": f"{current_user.username} replied to your post",
+                "post_id": post_id,
+                "reply_id": new_reply.id,
+            }),
         ))
     db.commit()
     db.refresh(new_reply)

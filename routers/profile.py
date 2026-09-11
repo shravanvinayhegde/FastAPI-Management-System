@@ -65,7 +65,13 @@ def can_view_profile(db: Session, viewer: Optional[models.User], target: models.
 
 def _require_viewable(db: Session, viewer: Optional[models.User], target: models.User) -> None:
     if not can_view_profile(db, viewer, target):
-        raise HTTPException(status_code=403, detail="This profile is private")
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This profile is private. Sign in and follow this account to view it."
+                if viewer is None else "This profile is private."
+            ),
+        )
 
 
 def _safe_text(value: Optional[str], field_name: str) -> Optional[str]:

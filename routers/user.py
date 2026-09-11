@@ -46,6 +46,10 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)
     return new_user
 
+@router.get("/me", response_model=schemas.UserOut)
+def get_me(current_user: models.User = Depends(oauth2.get_current_user)):
+    return current_user
+
 @router.get("/{id}", response_model=schemas.UserOut)
 def get_user(
     id: int,
@@ -134,7 +138,10 @@ def follow_user(
             type="NEW_FOLLOWER",
             entity_type="user",
             entity_id=current_user.id,
-            payload=json.dumps({"follower_id": current_user.id}),
+            payload=json.dumps({
+                "message": f"{current_user.username} started following you",
+                "follower_id": current_user.id,
+            }),
         )
         db.add(notification)
         db.commit()
