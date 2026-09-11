@@ -65,6 +65,12 @@ class ProfileRelationship(BaseModel):
     is_followed_by: bool
 
 
+class ProfileActions(BaseModel):
+    can_follow: bool
+    can_message: bool
+    is_self: bool
+
+
 class ProfilePrivacy(BaseModel):
     visibility: str
     show_posts: bool
@@ -75,6 +81,7 @@ class ProfileResponse(BaseModel):
     user: ProfileUser
     stats: ProfileStats
     relationship: ProfileRelationship
+    actions: ProfileActions
     privacy: ProfilePrivacy
 
 
@@ -107,6 +114,16 @@ class CommunityOut(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=2000)
+    shared_post_id: Optional[int] = None
+
+
+class SharedPostPreview(BaseModel):
+    id: int
+    title: str
+    content: str
+    owner_id: int
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class MessageOut(BaseModel):
@@ -114,6 +131,8 @@ class MessageOut(BaseModel):
     conversation_id: int
     sender_id: int
     content: str
+    shared_post_id: Optional[int] = None
+    shared_post: Optional[SharedPostPreview] = None
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
@@ -129,6 +148,9 @@ class ConversationOut(BaseModel):
     user_two_id: int
     created_at: datetime
     updated_at: datetime
+    other_user: PublicUser
+    last_message: Optional[MessageOut] = None
+    unread_count: int = 0
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -173,10 +195,30 @@ class ReplyOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class PostMediaOut(BaseModel):
+    id: int
+    url: str
+    media_type: str
+    mime_type: str
+    size_bytes: int
+    width: Optional[int] = None
+    height: Optional[int] = None
+    duration_seconds: Optional[int] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MediaUploadOut(BaseModel):
+    url: str
+    media_type: str
+    mime_type: str
+    size: int
+
+
 class ShareOut(BaseModel):
     post_id: int
     shared: bool
     share_count: int
+    url: Optional[str] = None
     
 
 class Post(PostBase):
@@ -184,6 +226,7 @@ class Post(PostBase):
     created_at: datetime
     owner_id:int
     owner:UserOut
+    media: list[PostMediaOut] = []
 
     model_config = ConfigDict(from_attributes=True)
 

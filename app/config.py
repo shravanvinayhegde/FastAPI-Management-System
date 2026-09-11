@@ -27,6 +27,10 @@ class Settings(BaseSettings):
 
     # Use a mounted persistent volume in production. The public contract remains /media/...
     media_directory: Path = Path("media")
+    max_image_upload_mb: int = 10
+    max_video_upload_mb: int = 100
+    max_image_dimension: int = 4096
+    frontend_url: Optional[str] = None
 
     model_config = SettingsConfigDict(env_file=Path(__file__).parent.parent / ".env")
 

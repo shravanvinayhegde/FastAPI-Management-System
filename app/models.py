@@ -28,6 +28,28 @@ class Post(Base):
     community = relationship("Community", back_populates="posts")
     replies = relationship("PostReply", back_populates="post", cascade="all, delete-orphan")
     shares = relationship("PostShare", back_populates="post", cascade="all, delete-orphan")
+    media = relationship("PostMedia", back_populates="post", cascade="all, delete-orphan")
+
+
+class PostMedia(Base):
+    __tablename__ = "post_media"
+
+    id = Column(Integer, primary_key=True, nullable=False)
+    post_id = Column(Integer, ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
+    media_type = Column(String(20), nullable=False)
+    storage_key = Column(String(2048), nullable=False)
+    mime_type = Column(String(100), nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    width = Column(Integer, nullable=True)
+    height = Column(Integer, nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
+
+    post = relationship("Post", back_populates="media")
+
+    @property
+    def url(self) -> str:
+        return f"/media/{self.storage_key}"
 
 
 class User(Base):  
@@ -130,10 +152,12 @@ class Message(Base):
     conversation_id = Column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
     sender_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     content = Column(String(2000), nullable=False)
+    shared_post_id = Column(Integer, ForeignKey("posts.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"), index=True)
     updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
 
     conversation = relationship("Conversation", back_populates="messages")
+    shared_post = relationship("Post")
 
 
 class Notification(Base):

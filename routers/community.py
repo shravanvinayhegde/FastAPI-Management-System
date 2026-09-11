@@ -118,6 +118,18 @@ def list_communities(
     return [_community_response(db, community, current_user) for community in communities]
 
 
+@router.get("/by-slug/{slug}", response_model=schemas.CommunityOut)
+def get_community_by_slug(
+    slug: str,
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(_optional_current_user),
+):
+    community = db.query(models.Community).filter(func.lower(models.Community.slug) == slug.lower()).first()
+    if community is None:
+        raise HTTPException(status_code=404, detail="Community not found")
+    return _community_response(db, community, current_user)
+
+
 @router.get("/{community_id}", response_model=schemas.CommunityOut)
 def get_community(
     community_id: int,

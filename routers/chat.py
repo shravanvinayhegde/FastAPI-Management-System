@@ -5,6 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from jose import JWTError
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import models, schemas
@@ -70,6 +71,39 @@ def _conversation_event(message: models.Message) -> dict:
     }
 
 
+def _conversation_response(db: Session, conversation: models.Conversation, user_id: int) -> schemas.ConversationOut:
+    other_id = conversation.user_two_id if conversation.user_one_id == user_id else conversation.user_one_id
+    other = db.query(models.User).filter(models.User.id == other_id).first()
+    last_message = db.query(models.Message).filter(
+        models.Message.conversation_id == conversation.id,
+    ).order_by(models.Message.created_at.desc(), models.Message.id.desc()).first()
+    member = db.query(models.ConversationMember).filter(
+        models.ConversationMember.conversation_id == conversation.id,
+        models.ConversationMember.user_id == user_id,
+    ).first()
+    unread_query = db.query(func.count(models.Message.id)).filter(
+        models.Message.conversation_id == conversation.id,
+        models.Message.sender_id != user_id,
+    )
+    if member and member.last_read_at is not None:
+        unread_query = unread_query.filter(models.Message.created_at > member.last_read_at)
+    return schemas.ConversationOut(
+        id=conversation.id,
+        user_one_id=conversation.user_one_id,
+        user_two_id=conversation.user_two_id,
+        created_at=conversation.created_at,
+        updated_at=conversation.updated_at,
+        other_user=schemas.PublicUser(
+            id=other.id,
+            username=other.username,
+            display_name=other.display_name,
+            avatar_url=other.avatar_url or "",
+        ),
+        last_message=schemas.MessageOut.model_validate(last_message) if last_message else None,
+        unread_count=unread_query.scalar() or 0,
+    )
+
+
 @router.post("/conversations", response_model=schemas.ConversationOut, status_code=status.HTTP_201_CREATED)
 def create_conversation(
     payload: schemas.ConversationCreate,
@@ -109,7 +143,7 @@ def create_conversation(
             raise HTTPException(status_code=409, detail="Conversation could not be created")
     else:
         db.refresh(conversation)
-    return conversation
+    return _conversation_response(db, conversation, current_user.id)
 
 
 @router.get("/conversations", response_model=list[schemas.ConversationOut])
@@ -119,12 +153,13 @@ def list_conversations(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(oauth2.get_current_user),
 ):
-    return db.query(models.Conversation).join(
+    conversations = db.query(models.Conversation).join(
         models.ConversationMember,
         models.ConversationMember.conversation_id == models.Conversation.id,
     ).filter(
         models.ConversationMember.user_id == current_user.id,
     ).order_by(models.Conversation.updated_at.desc(), models.Conversation.id.desc()).offset(skip).limit(limit).all()
+    return [_conversation_response(db, conversation, current_user.id) for conversation in conversations]
 
 
 @router.get("/conversations/{conversation_id}", response_model=schemas.ConversationOut)
@@ -133,7 +168,7 @@ def get_conversation(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(oauth2.get_current_user),
 ):
-    return _require_member(db, conversation_id, current_user.id)
+    return _conversation_response(db, _require_member(db, conversation_id, current_user.id), current_user.id)
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=list[schemas.MessageOut])
@@ -161,8 +196,19 @@ async def send_message(
     content = payload.content.strip()
     if not content:
         raise HTTPException(status_code=422, detail="Message content cannot be blank")
-    message = models.Message(conversation_id=conversation_id, sender_id=current_user.id, content=content)
+    if payload.shared_post_id is not None and db.query(models.Post.id).filter(
+        models.Post.id == payload.shared_post_id,
+        models.Post.published.is_(True),
+    ).first() is None:
+        raise HTTPException(status_code=404, detail="Shared post not found")
+    message = models.Message(
+        conversation_id=conversation_id,
+        sender_id=current_user.id,
+        content=content,
+        shared_post_id=payload.shared_post_id,
+    )
     db.add(message)
+    db.flush()
     conversation.updated_at = datetime.now(timezone.utc)
     recipient_id = conversation.user_two_id if conversation.user_one_id == current_user.id else conversation.user_one_id
     notification = models.Notification(
@@ -171,7 +217,12 @@ async def send_message(
         type="NEW_MESSAGE",
         entity_type="conversation",
         entity_id=conversation_id,
-        payload=json.dumps({"conversation_id": conversation_id}),
+        payload=json.dumps({
+            "conversation_id": conversation_id,
+            "message_id": message.id,
+            "actor_username": current_user.username,
+            "message_preview": content[:120],
+        }),
     )
     db.add(notification)
     db.commit()

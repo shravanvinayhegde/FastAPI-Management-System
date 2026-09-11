@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 from PIL import Image, UnidentifiedImageError
 
 from app import models, schemas
@@ -110,6 +110,11 @@ def _profile_response(db: Session, viewer: Optional[models.User], target: models
         relationship=schemas.ProfileRelationship(
             is_following=is_following,
             is_followed_by=is_followed_by,
+        ),
+        actions=schemas.ProfileActions(
+            can_follow=viewer is not None and viewer.id != target.id and not is_following,
+            can_message=viewer is not None and viewer.id != target.id,
+            is_self=viewer is not None and viewer.id == target.id,
         ),
         privacy=schemas.ProfilePrivacy(
             visibility=target.profile_visibility,
@@ -218,6 +223,76 @@ def get_profile_posts(
     target = _target_user(db, username)
     _require_viewable(db, viewer, target)
     return _profile_posts(db, target, skip, limit)
+
+
+@router.get("/{username}/replies", response_model=list[schemas.ReplyOut])
+def get_profile_replies(
+    username: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    viewer: Optional[models.User] = Depends(_viewer),
+):
+    target = _target_user(db, username)
+    _require_viewable(db, viewer, target)
+    if not target.show_posts:
+        return []
+    return db.query(models.PostReply).filter(
+        models.PostReply.owner_id == target.id,
+    ).order_by(models.PostReply.created_at.desc(), models.PostReply.id.desc()).offset(skip).limit(limit).all()
+
+
+@router.get("/{username}/media", response_model=list[schemas.PostMediaOut])
+def get_profile_media(
+    username: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    viewer: Optional[models.User] = Depends(_viewer),
+):
+    target = _target_user(db, username)
+    _require_viewable(db, viewer, target)
+    if not target.show_posts:
+        return []
+    media = db.query(models.PostMedia).join(models.Post).filter(
+        models.Post.owner_id == target.id,
+        models.Post.published.is_(True),
+    ).order_by(models.PostMedia.created_at.desc(), models.PostMedia.id.desc()).offset(skip).limit(limit).all()
+    return [schemas.PostMediaOut(
+        id=item.id,
+        url=f"/media/{item.storage_key}",
+        media_type=item.media_type,
+        mime_type=item.mime_type,
+        size_bytes=item.size_bytes,
+        width=item.width,
+        height=item.height,
+        duration_seconds=item.duration_seconds,
+    ) for item in media]
+
+
+@router.get("/{username}/likes", response_model=list[schemas.PostOut])
+def get_profile_likes(
+    username: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    viewer: Optional[models.User] = Depends(_viewer),
+):
+    target = _target_user(db, username)
+    _require_viewable(db, viewer, target)
+    if not target.show_posts:
+        return []
+    vote_count = aliased(models.Vote)
+    liked_vote = aliased(models.Vote)
+    results = db.query(models.Post, func.count(vote_count.post_id).label("votes")).join(
+        liked_vote, liked_vote.post_id == models.Post.id,
+    ).filter(
+        liked_vote.user_id == target.id,
+        models.Post.published.is_(True),
+    ).outerjoin(vote_count, vote_count.post_id == models.Post.id).group_by(
+        models.Post.id,
+    ).order_by(models.Post.created_at.desc(), models.Post.id.desc()).offset(skip).limit(limit).all()
+    return [{"Post": post, "votes": votes} for post, votes in results]
 
 
 def _profile_users(db: Session, target_id: int, following: bool, skip: int, limit: int):
