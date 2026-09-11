@@ -4,7 +4,7 @@ import uuid
 from io import BytesIO
 from pathlib import Path
 
-from fastapi import status, HTTPException, Depends, APIRouter, Query, File, UploadFile
+from fastapi import status, HTTPException, Depends, APIRouter, Query, File, Form, UploadFile
 from PIL import Image, UnidentifiedImageError
 from app import models, schemas
 from app.database import get_db
@@ -29,8 +29,7 @@ def _post_values(post: schemas.PostCreate) -> dict:
     return values
 
 
-@router.post("/media", response_model=schemas.MediaUploadOut, status_code=status.HTTP_201_CREATED)
-async def upload_post_media(file: UploadFile = File(...)):
+async def _store_post_media(file: UploadFile) -> schemas.MediaUploadOut:
     content_type = (file.content_type or "").lower()
     is_image = content_type.startswith("image/")
     is_video = content_type.startswith("video/")
@@ -77,6 +76,8 @@ async def upload_post_media(file: UploadFile = File(...)):
         media_type=media_type,
         mime_type=mime_type,
         size=len(data),
+        width=width if is_image else None,
+        height=height if is_image else None,
     )
 
 
@@ -92,39 +93,88 @@ async def attach_post_media(
         raise HTTPException(status_code=404, detail="Post not found")
     if post.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the post owner can attach media")
-    result = await upload_post_media(file)
+    result = await _store_post_media(file)
     storage_key = result.url.removeprefix("/media/")
-    db.add(models.PostMedia(
-        post_id=post_id,
-        media_type=result.media_type,
-        storage_key=storage_key,
-        mime_type=result.mime_type,
-        size_bytes=result.size,
-    ))
-    db.commit()
+    try:
+        db.add(models.PostMedia(
+            post_id=post_id,
+            media_type=result.media_type,
+            storage_key=storage_key,
+            mime_type=result.mime_type,
+            size_bytes=result.size,
+            width=result.width,
+            height=result.height,
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        (POST_MEDIA_DIRECTORY / Path(storage_key).name).unlink(missing_ok=True)
+        raise
     return result
 
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=schemas.Post)
-def create_posts(post: schemas.PostCreate, db: Session = Depends(get_db),
-                 current_user: int = Depends(oauth2.get_current_user)):
-    if post.community_id is not None:
-        community = db.query(models.Community).filter(models.Community.id == post.community_id).first()
+async def create_posts(
+    title: str = Form(...),
+    content: str = Form(...),
+    published: bool = Form(True),
+    community_id: Optional[int] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    video: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(oauth2.get_current_user),
+):
+    title = title.strip()
+    content = content.strip()
+    if not title or not content:
+        raise HTTPException(status_code=422, detail="Title and content cannot be blank")
+    if community_id is not None:
+        community = db.query(models.Community).filter(models.Community.id == community_id).first()
         if community is None:
             raise HTTPException(status_code=404, detail="Community not found")
         is_member = db.query(models.community_members).filter(
-            models.community_members.c.community_id == post.community_id,
+            models.community_members.c.community_id == community_id,
             models.community_members.c.user_id == current_user.id,
         ).first()
         if is_member is None:
             raise HTTPException(status_code=403, detail="Join the community before posting")
-    new_post = models.Post(owner_id=current_user.id, **_post_values(post))
+    stored_files: list[Path] = []
+    try:
+        uploaded_media = []
+        for file in (image, video):
+            if file is not None:
+                result = await _store_post_media(file)
+                uploaded_media.append(result)
+                stored_files.append(POST_MEDIA_DIRECTORY / Path(result.url).name)
 
-    db.add(new_post)
-    db.commit()
-    db.refresh(new_post)
-    # ensure relationship is loaded before session closes
-    _ = new_post.owner
-    return new_post
+        new_post = models.Post(
+            owner_id=current_user.id,
+            title=title,
+            content=content,
+            published=published,
+            community_id=community_id,
+        )
+        db.add(new_post)
+        db.flush()
+        for result in uploaded_media:
+            db.add(models.PostMedia(
+                post_id=new_post.id,
+                media_type=result.media_type,
+                storage_key=result.url.removeprefix("/media/"),
+                mime_type=result.mime_type,
+                size_bytes=result.size,
+                width=result.width,
+                height=result.height,
+            ))
+        db.commit()
+        db.refresh(new_post)
+        _ = new_post.owner
+        _ = new_post.media
+        return new_post
+    except Exception:
+        db.rollback()
+        for path in stored_files:
+            path.unlink(missing_ok=True)
+        raise
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_posts(id: int, db: Session = Depends(get_db),

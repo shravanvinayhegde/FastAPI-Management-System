@@ -1,1305 +1,747 @@
-# Backend Fixes — FastAPI Social Management System
+VoteFlow Backend — Exact Fix Instructions
 
-Repository:
+Repository: shravanvinayhegde/FastAPI-Management-System
 
-`shravanvinayhegde/FastAPI-Management-System`
+Latest commit inspected: 71486ee96c02e5a46e419321b2d5a5be0fcd3e89 (Implement backend reliability and media contracts).
 
-This document covers backend issues that affect the reliability, correctness, scalability, and feature behavior of the social-management web application.
+Scope
 
----
+These instructions target the current backend contract and the reported failures:
 
-# 1. Make media storage production-safe
+profile lookup returning user does not exist;
 
-**Priority: 🔴 CRITICAL**
+multipart image/video post upload failing;
 
-## File
+community slug links;
 
-```text
-routers/profile.py
-```
+profile-to-DM behavior;
 
-## Problem
+standard post sharing into DMs;
 
-Avatar files are stored locally:
+durable uploaded media;
 
-```python
-AVATAR_DIRECTORY = Path("media") / "avatars"
-```
+profile media responses;
 
-and:
+production deployment/migration consistency.
 
-```python
-path.write_bytes(data)
-```
+1. Fix the post creation endpoint — this is the main upload bug
 
-This works on a local machine.
+File
 
-However, production servers may use ephemeral/containerized filesystems.
+routers/post.py
 
-That creates a potentially dangerous flow:
+Current mismatch
 
-```text
-Upload avatar
-    ↓
-File stored on server filesystem
-    ↓
-Application restart/redeploy
-    ↓
-File may disappear
-```
+The frontend latest push sends:
 
-## Fix
+POST /posts/
+Content-Type: multipart/form-data
 
-Use persistent storage.
+title
+content
+published
+community_id
+image
+video
 
-Recommended choices:
+But the backend latest POST /posts/ still declares:
 
-```text
-Object storage
-├── S3
-├── Cloudflare R2
-├── Supabase Storage
-└── Cloudinary
-```
+def create_posts(
+    post: schemas.PostCreate,
+    ...
+):
 
-or a hosting provider's persistent volume.
+PostCreate is a JSON/Pydantic body model.
 
-The database should store the durable URL/object key rather than depending on local ephemeral files.
+It does not consume the frontend's multipart image and video file fields.
 
----
+This is the primary frontend/backend contract mismatch behind image/video posting failure.
 
-# 2. Keep media URL contract consistent
+Required solution
 
-**Priority: 🔴 CRITICAL**
-
-The backend currently stores:
-
-```text
-/media/avatars/file.jpg
-```
-
-This is valid if the client knows that `/media` belongs to the API server.
-
-Document and enforce the contract consistently.
-
-Recommended database value:
-
-```text
-/media/avatars/<filename>
-```
-
-Then the frontend resolves that against:
-
-```text
-NEXT_PUBLIC_API_URL
-```
-
-Do not randomly mix:
-
-```text
-/media/...
-https://api...
-```
-
-unless there is a clear reason.
-
----
-
-# 3. Add vote status endpoint
-
-**Priority: 🔴 HIGH**
-
-## File
-
-```text
-routers/vote.py
-```
-
-Current endpoint:
-
-```text
-POST /vote/
-```
-
-supports:
-
-```text
-dir = 1 → add
-dir = 0 → remove
-```
-
-but it doesn't tell the frontend whether the user already voted.
-
-## Fix
-
-Add:
-
-```http
-GET /vote/{post_id}/status
-```
-
-Response:
-
-```json
-{
-  "voted": true
-}
-```
-
-A better solution is to include vote status directly in the post response.
-
-For example:
-
-```json
-{
-  "Post": {...},
-  "votes": 12,
-  "user_voted": true
-}
-```
-
-This gives the frontend everything it needs.
-
----
-
-# 4. Make voting idempotent where appropriate
-
-**Priority: 🟠 HIGH**
-
-Current behavior:
-
-```text
-vote already exists
-↓
-POST dir=1
-↓
-409 Conflict
-```
-
-This is technically valid, but it makes UI integration unnecessarily fragile.
-
-You can instead make the operation behave like:
-
-```text
-dir=1 + already voted
-→ keep voted state
-```
-
-and:
-
-```text
-dir=0 + not voted
-→ keep not-voted state
-```
-
-Another option is to retain the strict API and have the frontend check status first.
-
-For a user-facing social application, an idempotent toggle-style API is generally easier to use.
-
----
-
-# 5. Fix `top` and `hot` community sorting
-
-**Priority: 🟠 HIGH**
-
-## File
-
-```text
-routers/community.py
-```
-
-Current implementation effectively does:
-
-```python
-if sort == "top":
-    order_by(vote_count.desc(), ...)
-elif sort == "hot":
-    order_by(vote_count.desc(), ...)
-```
-
-Therefore:
-
-```text
-TOP
-=
-HOT
-```
-
-## Fix
-
-Define separate algorithms.
-
-### Top
-
-Could be:
-
-```text
-highest vote count
-```
-
-### New
-
-Could be:
-
-```text
-newest posts
-```
-
-### Hot
-
-Should consider both:
-
-```text
-votes
-age
-engagement
-```
-
-A simple hotness approximation could use time decay.
-
-For example:
-
-```text
-score = votes / ((age_hours + 2) ^ 1.5)
-```
-
-The exact formula is up to the product design, but `hot` should not simply duplicate `top`.
-
----
-
-# 6. Ensure database constraints exist
-
-**Priority: 🔴 HIGH**
-
-Application-level duplicate checking exists in places such as:
-
-```text
-community
-username
-follow relationships
-```
-
-but important uniqueness rules should also exist in the database.
-
-Recommended constraints:
-
-```text
-users.email
-users.username
-communities.slug
-(follower_id, following_id)
-(post_id, user_id) for votes
-(post_id, user_id) for shares
-(conversation/user pair)
-(community_id, user_id)
-```
-
-## Why
-
-Application code can race.
-
-Example:
-
-```text
-Request A → checks username → available
-Request B → checks username → available
-
-Request A → inserts
-Request B → inserts
-```
-
-A DB-level unique constraint guarantees correctness.
-
----
-
-# 7. Make follow operations race-safe
-
-**Priority: 🟠 HIGH**
-
-The backend already catches:
-
-```python
-IntegrityError
-```
-
-which is good.
-
-Keep a unique constraint on:
-
-```text
-follower_id + following_id
-```
-
-so simultaneous requests cannot create duplicate relationships.
-
----
-
-# 8. Make conversation uniqueness database-enforced
-
-**Priority: 🟠 HIGH**
-
-The backend sorts the two IDs:
-
-```python
-user_one_id, user_two_id = sorted((...))
-```
-
-which is good.
-
-But the database should also guarantee that:
-
-```text
-(user_one_id, user_two_id)
-```
-
-is unique.
-
-Otherwise concurrent requests can theoretically create duplicate conversations.
-
----
-
-# 9. Fix WebSocket scalability
-
-**Priority: 🟠 HIGH**
-
-## File
-
-```text
-routers/chat.py
-```
-
-Current architecture:
-
-```python
-self.connections: dict[int, set[WebSocket]]
-```
-
-This connection registry exists only inside one Python process.
-
-Therefore:
-
-```text
-Worker A:
-User 1 websocket
-
-Worker B:
-User 2 sends message
-```
-
-Worker B cannot see Worker A's socket.
-
-## Fix for scaling
+Change POST /posts/ to a multipart endpoint.
 
 Use:
 
-```text
-              Redis Pub/Sub
-                  |
-        ┌─────────┴─────────┐
-        ↓                   ↓
- FastAPI worker A      FastAPI worker B
-        ↓                   ↓
- WebSocket users       WebSocket users
-```
+from fastapi import File, Form, UploadFile
 
-When a message occurs:
+and define approximately:
 
-```text
-HTTP request
-   ↓
-Database commit
-   ↓
-Redis publish
-   ↓
-all relevant workers
-   ↓
-WebSocket delivery
-```
+@router.post("/", status_code=status.HTTP_201_CREATED, response_model=schemas.Post)
+async def create_posts(
+    title: str = Form(...),
+    content: str = Form(...),
+    published: bool = Form(True),
+    community_id: Optional[int] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    video: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(oauth2.get_current_user),
+):
+    ...
 
-## For the current deployment
+Do not attempt to read the multipart request into schemas.PostCreate.
 
-If the application runs one worker/process, the current implementation can work.
+2. Refactor media validation into a shared helper
 
-Do not introduce unnecessary distributed infrastructure before you need it.
+Current problem
 
----
+upload_post_media() is itself an API endpoint:
 
-# 10. Handle WebSocket authentication failure distinctly
+@router.post("/media")
+async def upload_post_media(...)
 
-**Priority: 🟠 MEDIUM**
+but attach_post_media() calls that endpoint function internally.
 
-Current WebSocket authentication is:
+This mixes route handling and storage/business logic.
 
-```text
-/ws/events?token=...
-```
+Required architecture
 
-The server validates the JWT.
+Create a private helper:
 
-That's acceptable for this architecture, but invalid tokens should not enter an endless reconnect loop.
+async def _store_post_media(file: UploadFile) -> schemas.MediaUploadOut:
+    ...
 
-Current frontend reconnection can repeatedly attempt to connect.
+It should:
 
-Recommended behavior:
+validate MIME/content type;
 
-```text
-valid token
-→ reconnect on network failure
+read within the configured size limit;
 
-invalid/expired token
-→ close permanently
-→ require login
-```
+validate actual image format/container;
 
-The WebSocket protocol should communicate an authentication failure clearly.
+generate UUID filename;
 
----
+write to configured storage;
 
-# 11. Improve notification generation
+return the stored media metadata.
 
-**Priority: 🟠 HIGH**
+Then use _store_post_media() from both:
 
-Current notification handling covers important actions such as:
+POST /posts/
+POST /posts/{post_id}/media
 
-```text
-new follower
-new message
-```
+3. Protect /posts/media
 
-The social system should consistently generate notifications for relevant interactions.
+Security issue
 
-At minimum:
+The current standalone endpoint:
 
-```text
-follow
-message
-reply
-reply to reply
-```
+POST /posts/media
 
-Potentially:
+has no current_user dependency.
 
-```text
-post interaction
-community activity
-```
+That means anyone who can reach the API may be able to upload files to the media directory without authentication.
 
-depending on the intended product behavior.
+Fix
 
----
+Add:
 
-# 12. Standardize notification types
+current_user: models.User = Depends(oauth2.get_current_user)
 
-**Priority: 🟡 MEDIUM**
+or remove the standalone endpoint if the application will only upload through POST /posts/.
 
-Use a fixed set of backend notification names.
+Preferred product design: keep one authenticated multipart post-creation endpoint and remove redundant unauthenticated upload behavior.
 
-For example:
+4. During multipart post creation, store media in post_media
 
-```text
-NEW_FOLLOWER
-NEW_MESSAGE
-NEW_REPLY
-NEW_REPLY_TO_REPLY
-```
+When the post is created:
 
-Avoid arbitrary strings being created throughout the code.
+1. Validate community membership.
+2. Validate title/content.
+3. Insert Post.
+4. Flush to get post.id.
+5. Store image/video files.
+6. Create PostMedia rows with post_id.
+7. Commit transaction.
+8. Return Post with media.
 
-Better:
+Do not put uploaded files directly into posts.image_url / posts.video_url as the new design.
 
-```python
-class NotificationType(str, Enum):
-    NEW_FOLLOWER = "NEW_FOLLOWER"
-    NEW_MESSAGE = "NEW_MESSAGE"
-    NEW_REPLY = "NEW_REPLY"
-    NEW_REPLY_TO_REPLY = "NEW_REPLY_TO_REPLY"
-```
+Use PostMedia.
 
-This helps frontend rendering and validation.
+5. Make multipart creation transactional
 
----
+The upload workflow must not create a database post and then fail halfway through without cleanup.
 
-# 13. Standardize notification payloads
+Recommended flow:
 
-**Priority: 🟠 HIGH**
-
-Backend currently returns:
-
-```python
-payload: dict[str, object]
-```
-
-Keep that design.
-
-Define the expected structure for each notification.
-
-Example:
-
-### Follow
-
-```json
-{
-  "follower_id": 12,
-  "username": "shravan"
-}
-```
-
-### Message
-
-```json
-{
-  "conversation_id": 33,
-  "message_id": 91
-}
-```
-
-### Reply
-
-```json
-{
-  "post_id": 50,
-  "reply_id": 88
-}
-```
-
-Do not create arbitrary payload structures for the same notification type.
-
----
-
-# 14. Consolidate profile APIs
-
-**Priority: 🟠 HIGH**
-
-There are effectively two profile styles:
-
-```text
-/users/{id}
-```
-
-and:
-
-```text
-/users/{username}/profile
-```
-
-The newer profile router handles:
-
-```text
-visibility
-posts visibility
-communities visibility
-relationship
-profile data
-```
-
-This makes it preferable as the canonical profile API.
-
-## Recommended architecture
-
-Canonical public profile:
-
-```text
-GET /users/{username}/profile
-```
-
-Profile posts:
-
-```text
-GET /users/{username}/posts
-```
-
-Followers:
-
-```text
-GET /users/{username}/followers
-```
-
-Following:
-
-```text
-GET /users/{username}/following
-```
-
-Communities:
-
-```text
-GET /users/{username}/communities
-```
-
-Keep `/users/{id}` only where ID lookup is genuinely needed.
-
----
-
-# 15. Apply profile privacy consistently
-
-**Priority: 🔴 HIGH**
-
-Privacy logic exists in the newer profile implementation.
-
-But every endpoint exposing profile-related information needs to obey the same rules.
-
-For a private profile:
-
-```text
-anonymous
-→ denied
-
-non-follower
-→ denied
-
-follower
-→ allowed
-
-profile owner
-→ allowed
-```
-
-The same rule should apply consistently to:
-
-```text
-profile
-posts
-followers
-following
-communities
-```
-
----
-
-# 16. Make post visibility rules explicit
-
-**Priority: 🟠 HIGH**
-
-The general post endpoint currently returns posts without applying a sophisticated visibility layer.
-
-You should explicitly define:
-
-```text
-published = true
-```
-
-and decide what happens to:
-
-```text
-published = false
-```
-
-for:
-
-```text
-owner
-followers
-community members
-anonymous users
-```
-
-Do not let drafts accidentally appear in public feeds.
-
----
-
-# 17. Validate community membership before posting
-
-**Priority: ✅ Already mostly correct**
-
-The backend currently checks whether a user is a member before allowing a community post.
-
-Keep this rule:
-
-```text
-create community post
+validate everything first
         ↓
-community exists?
+store temporary files
         ↓
-user is member?
+DB insert Post
         ↓
-allow post
-```
-
-This is one of the better authorization paths in the current backend.
-
----
-
-# 18. Prevent creator from accidentally losing special community state
-
-**Priority: 🟠 MEDIUM**
-
-When creating a community, the creator is automatically inserted as a member.
-
-That is good.
-
-However, decide explicitly what happens when the creator chooses:
-
-```text
-Leave community
-```
-
-Questions the backend should answer:
-
-```text
-Can creator leave?
-Does ownership transfer?
-Can community become ownerless?
-```
-
-The API currently allows leaving if membership exists.
-
-A community system should have an explicit ownership policy.
-
----
-
-# 19. Fix avatar file lifecycle
-
-**Priority: 🟠 MEDIUM**
-
-Current avatar deletion correctly attempts to delete uploaded files.
-
-When moving to object storage, implement:
-
-```text
-delete DB reference
-+
-delete storage object
-```
-
-Also consider what happens when replacing an existing avatar:
-
-```text
-old avatar
-      ↓
-upload new avatar
-      ↓
-new DB URL
-```
-
-The old file should eventually be removed.
-
-Otherwise uploads accumulate indefinitely.
-
----
-
-# 20. Validate uploaded media more thoroughly
-
-**Priority: 🟠 MEDIUM**
-
-Avatar validation is already reasonably good:
-
-```text
-size
-format
-dimensions
-PIL verification
-```
-
-Keep those checks.
-
-For post media, use similarly strict validation:
-
-```text
-maximum file size
-allowed MIME type
-allowed extension
-actual file signature
-```
-
-Never trust the browser-provided MIME type alone.
-
----
-
-# 21. Add transaction boundaries around multi-step operations
-
-**Priority: 🟠 HIGH**
-
-Operations such as:
-
-```text
-create community
-create membership
-create notification
-send message
-create follow
-```
-
-often modify multiple database records.
-
-Make sure related database writes happen atomically where appropriate.
-
-Example:
-
-```text
-create follow
-+
-create notification
-```
-
-should not leave the database in an inconsistent state.
-
----
-
-# 22. Do not rely on background tasks for critical persistence
-
-The follow endpoint creates the notification in the database before scheduling the WebSocket notification.
-
-That is the correct order:
-
-```text
-database
-    ↓
+DB insert PostMedia
+        ↓
 commit
-    ↓
-realtime notification
-```
 
-Keep that approach.
+On database failure:
 
-The WebSocket event is a delivery mechanism, not the source of truth.
+rollback DB
+remove newly stored files
 
----
+On media validation failure:
 
-# 23. Treat HTTP/database state as authoritative
+no Post row should remain
 
-The backend should remain the authority for:
+This prevents orphan posts/files.
 
-```text
-votes
-followers
-community membership
-messages
-notifications
-posts
-profile settings
-```
+6. Return media metadata on post responses
 
-WebSockets should only accelerate updates.
+The backend model/schema already has:
 
-Correct architecture:
+media: list[PostMediaOut]
 
-```text
-HTTP API
-    ↓
-Database
-    ↓
-authoritative state
+Keep this.
 
-WebSocket
-    ↓
-real-time convenience
-```
+All post response paths must populate it:
 
-If a WebSocket event is missed, the application should be able to recover using HTTP.
+GET /posts/
+GET /posts/{post_id}
+GET /users/{username}/posts
+GET /users/{username}/likes
+GET /communities/{community_id}/posts
+POST /posts/
+PUT /posts/{post_id}
 
-Your messaging implementation already partially follows this model.
+Avoid a situation where create responses contain media but feed responses don't.
 
----
+7. Make legacy URL fields backward compatible
 
-# 24. Improve API response consistency
+The backend still has:
 
-Some endpoints return:
+image_url
+video_url
 
-```json
+Keep them temporarily for old data if they are already stored.
+
+New uploads should use post_media.
+
+Do not force an immediate destructive migration.
+
+Recommended compatibility logic:
+
+new post
+→ post_media
+
+old post
+→ legacy image_url/video_url
+
+Optionally migrate old URLs later.
+
+8. Fix GET /communities/by-slug/{slug} contract
+
+The latest backend provides:
+
+GET /communities/by-slug/{slug}
+
+Keep this endpoint.
+
+The frontend must call exactly this path.
+
+Do not rename it to /communities/slug/{slug} unless you change both repositories together.
+
+The cleanest fix is to keep the backend path and correct the frontend.
+
+9. Ensure community slug lookup is case-consistent
+
+Current lookup is effectively:
+
+func.lower(models.Community.slug) == slug.lower()
+
+Keep that behavior.
+
+Also make sure every new community gets:
+
+non-empty slug
+unique slug
+stable slug
+
+10. Fix profile lookup for every user
+
+File
+
+routers/profile.py
+
+Current lookup is:
+
+func.lower(models.User.username) == username.lower()
+
+This is correct.
+
+If production returns:
+
+User profile not found
+
+then the database has no matching username.
+
+Do not replace the profile endpoint with email/id lookup just to hide bad data.
+
+11. Verify the profile migration is actually applied in production
+
+Migration:
+
+f6a7b8c9d0e1_add_user_profiles.py
+
+The migration:
+
+adds username;
+
+adds display_name;
+
+fills existing users from email local-parts;
+
+makes username non-null;
+
+adds unique username constraint;
+
+adds profile visibility/settings.
+
+This is correct in principle.
+
+Production requirement
+
+Run:
+
+alembic current
+alembic heads
+alembic upgrade head
+
+Then verify:
+
+SELECT id, username, email, display_name
+FROM users
+ORDER BY id;
+
+There must be a valid non-null username for every existing user.
+
+12. Add a production data check for usernames
+
+Run:
+
+SELECT COUNT(*)
+FROM users
+WHERE username IS NULL OR username = '';
+
+Expected:
+
+0
+
+Check duplicates:
+
+SELECT LOWER(username), COUNT(*)
+FROM users
+GROUP BY LOWER(username)
+HAVING COUNT(*) > 1;
+
+Expected:
+
+0 rows
+
+Check a specific failing profile:
+
+SELECT id, username, email, display_name
+FROM users
+WHERE LOWER(username) = LOWER('karan_2');
+
+If this returns zero rows, the frontend is not the root cause.
+
+13. Keep username generation consistent for registration
+
+routers/user.py currently generates the username when registration does not supply one.
+
+Keep this behavior.
+
+However, ensure:
+
+email uniqueness
+username uniqueness
+
+are database enforced and the IntegrityError handler is retained.
+
+The JWT must continue storing:
+
+{"user_id": user.id}
+
+because the frontend already correctly reads user_id from the token.
+
+14. Keep profile response actions
+
+The backend's latest ProfileResponse already contains:
+
+actions=schemas.ProfileActions(
+    can_follow=...,
+    can_message=...,
+    is_self=...,
+)
+
+Keep this.
+
+It gives the frontend a reliable contract for profile action buttons.
+
+15. Improve can_message semantics
+
+Current behavior should allow an authenticated user to message another user regardless of whether they follow them.
+
+Recommended:
+
+can_message = viewer is not None and viewer.id != target.id
+
+Do not make messaging conditional on following unless that is an explicit product requirement.
+
+16. Fix conversation participant contract
+
+The latest backend already enriches ConversationOut with:
+
+other_user
+last_message
+unread_count
+
+Keep that.
+
+The frontend should not need to show:
+
+Conversation with user 7
+
+anymore.
+
+other_user should always be present for a valid authenticated 1-to-1 conversation.
+
+17. Avoid N+1 conversation queries as the app grows
+
+The current _conversation_response() performs separate queries for:
+
+other user
+last message
+conversation member
+unread count
+
+per conversation.
+
+That is acceptable for a small application but will scale poorly.
+
+Later, replace it with joined/subqueries or batched queries.
+
+This is not required to fix the immediate profile/upload issue.
+
+18. Shared post messages are already supported — finish the contract
+
+The backend now has:
+
+MessageCreate.shared_post_id
+MessageOut.shared_post_id
+MessageOut.shared_post
+
+Keep this.
+
+When shared_post_id is supplied:
+
+verify the post exists;
+
+verify it is published;
+
+store shared_post_id;
+
+return shared_post in the message response.
+
+The current backend performs the important existence/published check.
+
+19. Improve the shared post preview
+
+Current preview contains:
+
+id
+title
+content
+owner_id
+
+For a standard social share card, add:
+
+owner
+media
+community
+created_at
+
+or a compact nested structure:
+
 {
-  "message": "..."
+  "id": 123,
+  "title": "Example",
+  "content": "Preview...",
+  "owner": {
+    "id": 7,
+    "username": "karan_2",
+    "display_name": "Karan"
+  },
+  "media": [...]
 }
-```
 
-while others return complete resources.
+The frontend can then render a proper shared-post card in chat.
 
-For interactive APIs, consider returning authoritative state after mutation.
+20. Canonical post URL
+
+The Share endpoint already returns a URL based on:
+
+settings.frontend_url
+
+with fallback to:
+
+/post/{post_id}
+
+Set in production:
+
+frontend_url=https://voteflow-phi.vercel.app
+
+Then the API returns:
+
+https://voteflow-phi.vercel.app/post/123
+
+This is preferable to returning only a relative URL.
+
+21. Fix production media persistence
+
+The latest backend uses:
+
+settings.media_directory
+
+and stores files under:
+
+media/posts
+media/avatars
+
+This works only while the underlying storage is persistent.
+
+For production use either:
+
+persistent volume
+
+or:
+
+object storage
+
+Do not assume a normal ephemeral container filesystem is durable across redeploys.
+
+22. Fix media path security
+
+The backend already uses UUID filenames.
+
+Keep that.
+
+Do not use:
+
+file.filename
+
+directly as the stored path.
+
+Continue validating:
+
+actual image format
+actual video container
+file size
+image dimensions
+
+23. Populate media dimensions correctly
+
+The image upload helper already reads:
+
+width, height = image.size
+
+but the current MediaUploadOut does not expose those values.
+
+Add them to the upload result if the frontend will use them:
+
+width
+height
+
+For videos, duration is optional unless extracted with a media parser.
+
+24. Do not require ffmpeg just to ship the first working version
+
+For initial functionality:
+
+accept MP4/WebM/MOV
+validate container signatures
+store file
+serve file
+
+Duration/codec metadata can be added later.
+
+Avoid making ffmpeg a hard deployment dependency unless needed.
+
+25. Verify CORS for Vercel + multipart requests
+
+Production config must allow:
+
+https://voteflow-phi.vercel.app
+
+and the methods/headers used by:
+
+POST /posts/
+POST /users/me/avatar
+POST /conversations
+POST /posts/{id}/share
+
+Multipart requests with an Authorization header must successfully complete CORS negotiation.
+
+Do not use a wildcard origin together with credentials.
+
+26. Diagnose Failed to fetch correctly
+
+A browser-level Failed to fetch can mean:
+
+wrong backend URL
+CORS failure
+backend unavailable
+TLS/network failure
+frontend deployed with old environment variable
+
+It does NOT by itself mean the FastAPI handler returned a 4xx.
+
+After the frontend is updated, inspect DevTools → Network.
+
+For a successful image post, the request should look like:
+
+POST https://fastapi-management-system.onrender.com/posts/
+Status: 201
+Content-Type: multipart/form-data; boundary=...
+
+27. Test the profile endpoint directly after deployment
+
+Using a valid username:
+
+GET https://fastapi-management-system.onrender.com/users/<username>/profile
+
+For a public profile, expected:
+
+200
+
+For an inaccessible private profile:
+
+403
+
+For a nonexistent username:
+
+404 User profile not found
+
+For the reported bug, this direct API test is the decisive diagnostic.
+
+28. Test multipart posting with curl after deployment
 
 Example:
 
-### Follow
+curl -X POST \
+  "https://fastapi-management-system.onrender.com/posts/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "title=Test image post" \
+  -F "content=Testing direct upload" \
+  -F "published=true" \
+  -F "image=@test.jpg"
 
-Better:
+Expected:
 
-```json
-{
-  "following": true,
-  "follower_count": 20,
-  "following_count": 15
-}
-```
+201 Created
 
-Current backend already does something similar, which is good.
+with a post response containing:
 
-Apply the same principle to:
+"media": [
+  {
+    "url": "/media/posts/...",
+    "media_type": "image"
+  }
+]
 
-```text
-votes
-community membership
-notifications
-profile updates
-```
+Then verify the media URL is actually served.
 
----
+29. Ensure /posts/{post_id} remains available for shared links
 
-# 25. Add tests for the important social flows
+The backend latest push already provides canonical post detail lookup.
 
-**Priority: 🔴 HIGH**
+Keep:
 
-Add backend tests for:
+GET /posts/{post_id}
 
-## Authentication
+and ensure it returns:
 
-```text
-register
-login
-invalid password
-expired token
-```
-
-## Users
-
-```text
-follow
-unfollow
-duplicate follow
-self follow
-followers
-following
-```
-
-## Posts
-
-```text
-create
-edit
-delete
-unauthorized edit
-unauthorized delete
-```
-
-## Votes
-
-```text
-vote
-remove vote
-duplicate vote
-wrong-user removal
-```
-
-## Replies
-
-```text
-create
-nested reply
-invalid parent
-edit
-delete
-wrong-user edit
-wrong-user delete
-```
-
-## Communities
-
-```text
-create
-duplicate community
-join
-duplicate join
-leave
-post to community
-non-member posting
-```
-
-## Messaging
-
-```text
-create conversation
-duplicate conversation
-send message
-unauthorized conversation
-edit own message
-edit somebody else's message
-delete own message
-delete somebody else's message
-```
-
-## Notifications
-
-```text
-list
-unread count
-mark read
-mark all read
-```
-
----
-
-# 26. Add API contract tests
-
-The biggest integration issue in the two repositories is contract drift.
-
-Create tests that verify:
-
-```text
-backend response
-       ↓
-matches frontend expected structure
-```
-
-Especially for:
-
-```text
-Notification
-Message
 Post
-Profile
-Community
-```
-
-The `Notification.payload` mismatch is exactly the type of problem these tests should catch.
-
----
-
-# 27. Clean repository artifacts
-
-The backend repository contains committed:
-
-```text
-__pycache__/
-*.pyc
-```
-
-These should not be tracked.
-
-Remove them from git and ensure `.gitignore` contains:
-
-```gitignore
-__pycache__/
-*.py[cod]
-*$py.class
-```
-
-This doesn't directly break a feature, but it keeps the repository clean and prevents generated Python artifacts from being versioned.
-
----
-
-# 28. Keep database migrations synchronized
-
-The backend contains multiple Alembic migrations covering:
-
-```text
-users
-posts
 votes
-follows
-communities
-messaging
 media
-profiles
-```
+owner
 
-Every model/schema change should have a corresponding migration.
+for published posts.
 
-Deployment flow should be:
+30. Backend acceptance tests
 
-```text
-git push
-   ↓
-deploy
-   ↓
-alembic upgrade head
-   ↓
-start FastAPI
-```
+Profiles
 
-Never depend on manually modifying production databases.
+Existing users all have usernames.
 
----
+Username is unique in DB.
 
-# 29. Verify CORS configuration
+/users/{username}/profile returns 200 for public profiles.
 
-## File
+Own private profile returns 200.
 
-```text
-app/main.py
-app/config.py
-```
+Follower-accessible private profile returns 200.
 
-The backend uses:
+Unauthorized private profile returns 403.
 
-```python
-CORSMiddleware
-```
+Unknown username returns 404.
 
-and reads origins from configuration.
+Posts/media
 
-Production should explicitly allow the deployed Vercel origin.
+JSON-only legacy post path is handled intentionally.
 
-For example:
+Multipart post creation works.
 
-```text
-https://voteflow-phi.vercel.app
-```
+Image upload works.
 
-and local development:
+Video upload works.
 
-```text
-http://localhost:3000
-```
+Invalid image rejected.
 
-Do not use overly broad production CORS settings unnecessarily.
+Invalid video rejected.
 
----
+Oversized image rejected.
 
-# 30. Verify Render/WebSocket deployment behavior
+Oversized video rejected.
 
-Normal HTTP:
+Media is saved in post_media.
 
-```text
-https://fastapi-management-system.onrender.com
-```
+Created post response contains media.
 
-WebSocket:
+Feed response contains media.
 
-```text
-wss://fastapi-management-system.onrender.com/ws/events
-```
+Media survives production restart when persistent storage is configured.
 
-Make sure the production infrastructure actually supports WebSocket connections for the deployed service.
+Communities
 
-A working:
+Community has a slug.
 
-```text
-GET /health
-```
+Slug is unique.
 
-does not prove:
+/communities/by-slug/{slug} returns the community.
 
-```text
-WebSocket /ws/events
-```
+Membership state is correct.
 
-is working.
+Community post requires membership.
 
-Test both independently.
+Messaging
 
----
+Creating a conversation returns other_user.
 
-# Backend Priority Order
+Existing conversation is reused.
 
-```text
-P0
-├── 1. Production media persistence
-├── 2. Consistent media URL contract
-├── 3. Vote state endpoint
-└── 4. Profile/privacy consistency
+Messages list returns latest message/unread count where applicable.
 
-P1
-├── 5. Database uniqueness constraints
-├── 6. WebSocket reliability/scaling
-├── 7. Notification contract
-├── 8. Notification coverage
-├── 9. Post visibility
-├── 10. Community ownership rules
-└── 11. Backend integration tests
+Shared post message works.
 
-P2
-├── 12. Hot/top algorithm
-├── 13. Media lifecycle cleanup
-├── 14. API response consistency
-├── 15. CORS/deployment hardening
-└── 16. Repository/migration cleanup
-```
+Shared post preview is returned.
 
-# Backend Definition of Done
+Sharing
 
-The backend should pass:
+Share is persisted once per user.
 
-```text
-[ ] register
-[ ] login
-[ ] invalid login
-[ ] authenticated requests
-[ ] expired token rejection
-[ ] create post
-[ ] update own post
-[ ] reject editing another user's post
-[ ] delete own post
-[ ] reject deleting another user's post
-[ ] vote
-[ ] remove vote
-[ ] duplicate vote handling
-[ ] vote status
-[ ] create reply
-[ ] create nested reply
-[ ] reject invalid parent
-[ ] edit reply
-[ ] delete reply
-[ ] follow user
-[ ] unfollow user
-[ ] reject self-follow
-[ ] duplicate-follow protection
-[ ] create community
-[ ] duplicate community protection
-[ ] join community
-[ ] duplicate join protection
-[ ] leave community
-[ ] community post authorization
-[ ] create conversation
-[ ] prevent duplicate conversation
-[ ] send message
-[ ] retrieve messages
-[ ] edit own message
-[ ] reject editing another user's message
-[ ] delete own message
-[ ] reject deleting another user's message
-[ ] notification creation
-[ ] notification list
-[ ] unread count
-[ ] mark read
-[ ] mark all read
-[ ] profile privacy
-[ ] profile posts visibility
-[ ] community visibility
-[ ] avatar upload
-[ ] avatar deletion
-[ ] media persistence
-[ ] WebSocket authentication
-[ ] WebSocket message delivery
-[ ] WebSocket notification delivery
-[ ] CORS
-[ ] migrations
-```
+Share count is correct.
 
-# Final Architecture Target
-
-The finished system should behave like:
-
-```text
-                     ┌─────────────────────┐
-                     │      Next.js        │
-                     │       Vercel        │
-                     └──────────┬──────────┘
-                                │
-                     HTTPS REST │
-                                ▼
-                     ┌─────────────────────┐
-                     │      FastAPI        │
-                     │      Backend        │
-                     └──────────┬──────────┘
-                                │
-                ┌───────────────┼────────────────┐
-                │               │                │
-                ▼               ▼                ▼
-             PostgreSQL      Redis*          Object Storage*
-                                │
-                                │
-                                ▼
-                          WebSocket events
-
-* Redis is needed when realtime connections span
-  multiple workers/instances.
-* Object storage is recommended for persistent
-  production media.
-```
-
-The key principle is:
-
-```text
-PostgreSQL = source of truth
-FastAPI    = business logic + authorization
-WebSocket  = realtime delivery
-Frontend   = presentation + client state
-Object     = persistent media
-```
+Canonical frontend URL is returned when frontend_url is configured.

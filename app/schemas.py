@@ -112,6 +112,18 @@ class CommunityOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class PostMediaOut(BaseModel):
+    id: int
+    url: str
+    media_type: str
+    mime_type: str
+    size_bytes: int
+    width: Optional[int] = None
+    height: Optional[int] = None
+    duration_seconds: Optional[int] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
 class MessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=2000)
     shared_post_id: Optional[int] = None
@@ -122,6 +134,10 @@ class SharedPostPreview(BaseModel):
     title: str
     content: str
     owner_id: int
+    owner: Optional[UserOut] = None
+    media: list[PostMediaOut] = []
+    community: Optional[CommunityOut] = None
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -195,23 +211,13 @@ class ReplyOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class PostMediaOut(BaseModel):
-    id: int
-    url: str
-    media_type: str
-    mime_type: str
-    size_bytes: int
-    width: Optional[int] = None
-    height: Optional[int] = None
-    duration_seconds: Optional[int] = None
-    model_config = ConfigDict(from_attributes=True)
-
-
 class MediaUploadOut(BaseModel):
     url: str
     media_type: str
     mime_type: str
     size: int
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 class ShareOut(BaseModel):
