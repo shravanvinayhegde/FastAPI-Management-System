@@ -14,10 +14,12 @@ router = APIRouter(prefix="/users", tags=["Users"])
 
 @router.get("/", response_model=list[schemas.UserOut])
 def get_all_users(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    current_user: int = Depends(oauth2.get_current_user)  # added auth
+    current_user: int = Depends(oauth2.get_current_user),
 ):
-    return db.query(models.User).all()
+    return db.query(models.User).order_by(models.User.id).offset(skip).limit(limit).all()
 
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=schemas.UserOut)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
@@ -50,7 +52,7 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
 def get_me(current_user: models.User = Depends(oauth2.get_current_user)):
     return current_user
 
-@router.get("/{id}", response_model=schemas.UserOut)
+@router.get("/{id:int}", response_model=schemas.UserOut)
 def get_user(
     id: int,
     db: Session = Depends(get_db),
@@ -113,7 +115,7 @@ def _get_target_user(db: Session, user_id: int) -> models.User:
     return user
 
 
-@router.post("/{id}/follow", response_model=schemas.FollowStatus)
+@router.post("/{id:int}/follow", response_model=schemas.FollowStatus)
 def follow_user(
     id: int,
     background_tasks: BackgroundTasks,
@@ -159,7 +161,7 @@ def follow_user(
     return _get_follow_status(db, current_user.id, id)
 
 
-@router.delete("/{id}/follow", response_model=schemas.FollowStatus)
+@router.delete("/{id:int}/follow", response_model=schemas.FollowStatus)
 def unfollow_user(
     id: int,
     db: Session = Depends(get_db),
@@ -179,7 +181,7 @@ def unfollow_user(
     return _get_follow_status(db, current_user.id, id)
 
 
-@router.get("/{id}/follow-status", response_model=schemas.FollowStatus)
+@router.get("/{id:int}/follow-status", response_model=schemas.FollowStatus)
 def get_follow_status(
     id: int,
     db: Session = Depends(get_db),
@@ -189,7 +191,7 @@ def get_follow_status(
     return _get_follow_status(db, current_user.id, id)
 
 
-@router.get("/{id}/followers", response_model=list[schemas.UserOut])
+@router.get("/{id:int}/followers", response_model=list[schemas.UserOut])
 def get_followers(
     id: int,
     skip: int = Query(0, ge=0),
@@ -206,7 +208,7 @@ def get_followers(
     ).order_by(models.user_follows.c.created_at.desc()).offset(skip).limit(limit).all()
 
 
-@router.get("/{id}/following", response_model=list[schemas.UserOut])
+@router.get("/{id:int}/following", response_model=list[schemas.UserOut])
 def get_following(
     id: int,
     skip: int = Query(0, ge=0),

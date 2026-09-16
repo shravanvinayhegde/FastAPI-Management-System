@@ -25,8 +25,15 @@ class Settings(BaseSettings):
     # - "http://localhost:3000,https://myapp.com"
     cors_origins: Optional[str] = None
 
-    # Use a mounted persistent volume in production. The public contract remains /media/...
+    # Local disk fallback when S3/R2 env vars are unset. Public contract remains /media/...
     media_directory: Path = Path("media")
+    s3_bucket: Optional[str] = None
+    s3_region: Optional[str] = None
+    s3_endpoint_url: Optional[str] = None
+    s3_access_key_id: Optional[str] = None
+    s3_secret_access_key: Optional[str] = None
+    # Optional public base URL (e.g. R2 custom domain); defaults to s3_endpoint_url
+    s3_public_base_url: Optional[str] = None
     max_image_upload_mb: int = 10
     max_video_upload_mb: int = 100
     max_image_dimension: int = 4096

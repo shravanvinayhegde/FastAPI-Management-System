@@ -19,8 +19,11 @@ def _optional_current_user(
 ) -> Optional[models.User]:
     if not token:
         return None
-    credentials_exception = HTTPException(status_code=401, detail="Not valid credentials")
-    token_data = oauth2.verify_access_token(token, credentials_exception)
+    try:
+        credentials_exception = HTTPException(status_code=401, detail="Not valid credentials")
+        token_data = oauth2.verify_access_token(token, credentials_exception)
+    except HTTPException:
+        return None
     return db.query(models.User).filter(models.User.id == token_data.id).first()
 
 

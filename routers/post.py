@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi import status, HTTPException, Depends, APIRouter, Query, File, Form, UploadFile
 from PIL import Image, UnidentifiedImageError
-from app import models, schemas
+from app import models, schemas, storage
 from app.database import get_db
 from app.config import settings
 from sqlalchemy.orm import Session
@@ -16,7 +16,6 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 router = APIRouter(prefix="/posts", tags=["Posts"])
-POST_MEDIA_DIRECTORY = settings.media_directory / "posts"
 ALLOWED_IMAGE_FORMATS = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime"}
 
@@ -69,8 +68,7 @@ async def _store_post_media(file: UploadFile) -> schemas.MediaUploadOut:
         mime_type = ALLOWED_VIDEO_EXTENSIONS[extension]
 
     filename = f"{uuid.uuid4().hex}.{extension}"
-    POST_MEDIA_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    (POST_MEDIA_DIRECTORY / filename).write_bytes(data)
+    storage.save_bytes(f"posts/{filename}", data, mime_type)
     return schemas.MediaUploadOut(
         url=f"/media/posts/{filename}",
         media_type=media_type,
@@ -93,6 +91,14 @@ async def attach_post_media(
         raise HTTPException(status_code=404, detail="Post not found")
     if post.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the post owner can attach media")
+    
+    # Check maximum media per post (limit to 10 files)
+    existing_media_count = db.query(func.count(models.PostMedia.id)).filter(
+        models.PostMedia.post_id == post_id
+    ).scalar() or 0
+    if existing_media_count >= 10:
+        raise HTTPException(status_code=400, detail="Maximum 10 media files per post")
+    
     result = await _store_post_media(file)
     storage_key = result.url.removeprefix("/media/")
     try:
@@ -108,9 +114,35 @@ async def attach_post_media(
         db.commit()
     except Exception:
         db.rollback()
-        (POST_MEDIA_DIRECTORY / Path(storage_key).name).unlink(missing_ok=True)
+        storage.delete_bytes(storage_key)
         raise
     return result
+
+@router.delete("/{post_id}/media/{media_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_post_media(
+    post_id: int,
+    media_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(oauth2.get_current_user),
+):
+    post = db.query(models.Post).filter(models.Post.id == post_id).first()
+    if post is None:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Only the post owner can delete media")
+    
+    media = db.query(models.PostMedia).filter(
+        models.PostMedia.id == media_id,
+        models.PostMedia.post_id == post_id
+    ).first()
+    if media is None:
+        raise HTTPException(status_code=404, detail="Media not found")
+    
+    storage.delete_bytes(media.storage_key)
+    
+    # Delete database record
+    db.delete(media)
+    db.commit()
 
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=schemas.Post)
 async def create_posts(
@@ -137,14 +169,14 @@ async def create_posts(
         ).first()
         if is_member is None:
             raise HTTPException(status_code=403, detail="Join the community before posting")
-    stored_files: list[Path] = []
+    stored_keys: list[str] = []
     try:
         uploaded_media = []
         for file in (image, video):
             if file is not None:
                 result = await _store_post_media(file)
                 uploaded_media.append(result)
-                stored_files.append(POST_MEDIA_DIRECTORY / Path(result.url).name)
+                stored_keys.append(result.url.removeprefix("/media/"))
 
         new_post = models.Post(
             owner_id=current_user.id,
@@ -172,8 +204,8 @@ async def create_posts(
         return new_post
     except Exception:
         db.rollback()
-        for path in stored_files:
-            path.unlink(missing_ok=True)
+        for key in stored_keys:
+            storage.delete_bytes(key)
         raise
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -187,6 +219,10 @@ def delete_posts(id: int, db: Session = Depends(get_db),
     if deleted_post.owner_id != current_user.id: 
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not Authorised")
     
+    # Delete associated media files
+    for media in deleted_post.media:
+        storage.delete_bytes(media.storage_key)
+    
     db.delete(deleted_post)
     db.commit()
 
@@ -198,12 +234,20 @@ def update_post(id: int, post: schemas.PostCreate, db: Session = Depends(get_db)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Post with id {id} not found")
     if updated_post.owner_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not Authorised")
-    for key, value in _post_values(post).items():
-        setattr(updated_post, key, value)
+    
+    # Only allow updates to title, content, and published status
+    # Media URLs should not be updated via PUT endpoint
+    if post.title and post.title.strip():
+        updated_post.title = post.title.strip()
+    if post.content and post.content.strip():
+        updated_post.content = post.content.strip()
+    updated_post.published = post.published
+    
     db.commit()
     db.refresh(updated_post)
     # ensure relationship is loaded before session closes
     _ = updated_post.owner
+    _ = updated_post.media
     return updated_post
 
 @router.get("/", response_model=list[schemas.PostOut]) 
@@ -215,7 +259,7 @@ def get_posts(db: Session = Depends(get_db),
         db.query(models.Post, func.count(models.Vote.post_id).label("votes"))
         .join(models.Vote, models.Vote.post_id == models.Post.id, isouter=True)
         .group_by(models.Post.id)
-        .filter(models.Post.published.is_(True), models.Post.title.contains(search))
+        .filter(models.Post.published.is_(True), models.Post.title.ilike(f"%{search}%"))
         .limit(limit)
         .offset(skip)
         .all()

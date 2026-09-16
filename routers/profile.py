@@ -1,7 +1,6 @@
 import re
 import uuid
 from io import BytesIO
-from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
@@ -10,13 +9,12 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, aliased
 from PIL import Image, UnidentifiedImageError
 
-from app import models, schemas
+from app import models, schemas, storage
 from app.config import settings
 from app.database import get_db
 from routers import oauth2
 
 router = APIRouter(prefix="/users", tags=["Profiles"])
-AVATAR_DIRECTORY = settings.media_directory / "avatars"
 MAX_AVATAR_BYTES = 5 * 1024 * 1024
 MAX_AVATAR_DIMENSION = 4096
 ALLOWED_AVATAR_FORMATS = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}
@@ -36,8 +34,11 @@ def _viewer(
 ) -> Optional[models.User]:
     if not token:
         return None
-    credentials_exception = HTTPException(status_code=401, detail="Not valid credentials")
-    token_data = oauth2.verify_access_token(token, credentials_exception)
+    try:
+        credentials_exception = HTTPException(status_code=401, detail="Not valid credentials")
+        token_data = oauth2.verify_access_token(token, credentials_exception)
+    except HTTPException:
+        return None
     return db.query(models.User).filter(models.User.id == token_data.id).first()
 
 
@@ -177,10 +178,10 @@ async def upload_avatar(
     if width > MAX_AVATAR_DIMENSION or height > MAX_AVATAR_DIMENSION:
         raise HTTPException(status_code=422, detail="Avatar dimensions are too large")
 
-    AVATAR_DIRECTORY.mkdir(parents=True, exist_ok=True)
     filename = f"{uuid.uuid4().hex}.{ALLOWED_AVATAR_FORMATS[image_format]}"
-    path = AVATAR_DIRECTORY / filename
-    path.write_bytes(data)
+    extension = ALLOWED_AVATAR_FORMATS[image_format]
+    content_type = f"image/{extension}" if extension != "jpg" else "image/jpeg"
+    storage.save_bytes(f"avatars/{filename}", data, content_type)
     current_user.avatar_url = f"/media/avatars/{filename}"
     current_user.avatar_type = "uploaded"
     db.commit()
@@ -194,9 +195,7 @@ def delete_avatar(
     current_user: models.User = Depends(oauth2.get_current_user),
 ):
     if current_user.avatar_type == "uploaded" and current_user.avatar_url:
-        path = (AVATAR_DIRECTORY / Path(current_user.avatar_url).name).resolve()
-        if path.is_file() and path.parent == AVATAR_DIRECTORY.resolve():
-            path.unlink()
+        storage.delete_bytes(current_user.avatar_url.removeprefix("/media/"))
     current_user.avatar_url = None
     current_user.avatar_type = "default"
     db.commit()

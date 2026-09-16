@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
-from jose import JWTError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -308,7 +307,7 @@ async def websocket_events(websocket: WebSocket, token: Optional[str] = None):
         await manager.connect(user_id, websocket)
         while True:
             await websocket.receive_text()
-    except (WebSocketDisconnect, JWTError):
+    except WebSocketDisconnect:
         pass
     except HTTPException:
         await websocket.close(code=1008)
