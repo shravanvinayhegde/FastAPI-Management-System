@@ -26,7 +26,7 @@ def _vote_status(db: Session, post_id: int, user_id: int) -> schemas.VoteStatus:
 def vote(
     vote: schemas.Vote,
     db: Session = Depends(get_db),
-    current_user: int = Depends(oauth2.get_current_user)
+    current_user: models.User = Depends(oauth2.get_current_user)
 ):
     vote_query = db.query(models.Vote).filter(
         models.Vote.post_id == vote.post_id,

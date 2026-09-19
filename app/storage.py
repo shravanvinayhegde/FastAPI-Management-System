@@ -48,5 +48,11 @@ def delete_bytes(key: str) -> None:
 
 
 def public_url(key: str) -> str:
-    base = (settings.s3_public_base_url or settings.s3_endpoint_url or "").rstrip("/")
-    return f"{base}/{settings.s3_bucket}/{key}"
+    if settings.s3_public_base_url:
+        return f"{settings.s3_public_base_url.rstrip('/')}/{key}"
+    if settings.s3_endpoint_url:
+        return f"{settings.s3_endpoint_url.rstrip('/')}/{settings.s3_bucket}/{key}"
+    if settings.s3_bucket:
+        region = settings.s3_region or "us-east-1"
+        return f"https://{settings.s3_bucket}.s3.{region}.amazonaws.com/{key}"
+    return f"/media/{key}"

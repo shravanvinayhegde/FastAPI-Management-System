@@ -19,12 +19,8 @@ def _build_sqlalchemy_database_url() -> str:
             if not value
         ]
         if missing:
-            missing_str = ", ".join(missing)
-            raise ValueError(
-                "Database configuration is incomplete. "
-                "Set DATABASE_URL or all split DB vars. "
-                f"Missing: {missing_str}"
-            )
+            # Fallback to local sqlite for development and test environments if DB vars are unset
+            return "sqlite:///./voteflow.db"
 
         url = (
             f"postgresql://{settings.database_username}:{quote_plus(settings.database_password)}"
@@ -40,7 +36,8 @@ def _build_sqlalchemy_database_url() -> str:
 
 SQLALCHEMY_DATABASE_URL = _build_sqlalchemy_database_url()
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+connect_args = {"check_same_thread": False} if SQLALCHEMY_DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

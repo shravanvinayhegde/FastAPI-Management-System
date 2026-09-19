@@ -17,7 +17,7 @@ def get_all_users(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    current_user: int = Depends(oauth2.get_current_user),
+    current_user: models.User = Depends(oauth2.get_current_user),
 ):
     return db.query(models.User).order_by(models.User.id).offset(skip).limit(limit).all()
 
@@ -56,7 +56,7 @@ def get_me(current_user: models.User = Depends(oauth2.get_current_user)):
 def get_user(
     id: int,
     db: Session = Depends(get_db),
-    current_user: int = Depends(oauth2.get_current_user)
+    current_user: models.User = Depends(oauth2.get_current_user)
 ):
     user = db.query(models.User).filter(models.User.id == id).first()
     if not user:

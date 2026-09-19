@@ -1,4 +1,4 @@
-from sqlalchemy import CheckConstraint, Column, Integer, String, Boolean, TIMESTAMP, Table, text, ForeignKey, UniqueConstraint
+from sqlalchemy import CheckConstraint, Column, Integer, String, Boolean, TIMESTAMP, Table, text, ForeignKey, UniqueConstraint, func
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -7,7 +7,7 @@ user_follows = Table(
     Base.metadata,
     Column("follower_id", ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True),
     Column("following_id", ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True),
-    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=func.now()),
     CheckConstraint("follower_id <> following_id", name="ck_user_follows_no_self_follow"),
 )
 
@@ -21,7 +21,7 @@ class Post(Base):
     image_url = Column(String(2048), nullable=True)
     video_url = Column(String(2048), nullable=True)
     published = Column(Boolean, server_default='True', default=True)
-    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text('NOW()'))
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
     owner_id=Column(Integer,ForeignKey("users.id",ondelete="CASCADE"),nullable=False)  
     community_id = Column(Integer, ForeignKey("communities.id", ondelete="SET NULL"), nullable=True, index=True)
     owner=relationship("User")
@@ -43,7 +43,7 @@ class PostMedia(Base):
     width = Column(Integer, nullable=True)
     height = Column(Integer, nullable=True)
     duration_seconds = Column(Integer, nullable=True)
-    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
     post = relationship("Post", back_populates="media")
 
@@ -65,8 +65,8 @@ class User(Base):
     profile_visibility = Column(String(20), nullable=False, default="public", server_default="public")
     show_posts = Column(Boolean, nullable=False, default=True, server_default="true")
     show_communities = Column(Boolean, nullable=False, default=True, server_default="true")
-    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text('NOW()'))
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text('NOW()'))
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
     followers = relationship(
         "User",
         secondary=user_follows,
@@ -101,8 +101,8 @@ class Community(Base):
     slug = Column(String(100), nullable=False, unique=True, index=True)
     description = Column(String(500), nullable=False, default="", server_default="")
     creator_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
-    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
     creator = relationship("User", back_populates="created_communities")
     members = relationship("User", secondary="community_members", back_populates="communities")
@@ -114,7 +114,7 @@ community_members = Table(
     Base.metadata,
     Column("user_id", ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True),
     Column("community_id", ForeignKey("communities.id", ondelete="CASCADE"), primary_key=True, index=True),
-    Column("joined_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")),
+    Column("joined_at", TIMESTAMP(timezone=True), nullable=False, server_default=func.now()),
 )
 
 
@@ -128,8 +128,8 @@ class Conversation(Base):
     id = Column(Integer, primary_key=True, nullable=False)
     user_one_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     user_two_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
     members = relationship("ConversationMember", back_populates="conversation", cascade="all, delete-orphan")
@@ -139,7 +139,7 @@ class ConversationMember(Base):
     __tablename__ = "conversation_members"
     conversation_id = Column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
-    joined_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
+    joined_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
     last_read_at = Column(TIMESTAMP(timezone=True), nullable=True)
 
     conversation = relationship("Conversation", back_populates="members")
@@ -153,8 +153,8 @@ class Message(Base):
     sender_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     content = Column(String(2000), nullable=False)
     shared_post_id = Column(Integer, ForeignKey("posts.id", ondelete="SET NULL"), nullable=True, index=True)
-    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"), index=True)
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
     conversation = relationship("Conversation", back_populates="messages")
     shared_post = relationship("Post")
@@ -171,7 +171,7 @@ class Notification(Base):
     entity_id = Column(Integer, nullable=True)
     payload = Column(String(2000), nullable=False, default="{}", server_default="{}")
     is_read = Column(Boolean, nullable=False, default=False, server_default="false", index=True)
-    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"), index=True)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
 
 
 class PostReply(Base):
@@ -182,8 +182,8 @@ class PostReply(Base):
     parent_id = Column(Integer, ForeignKey("post_replies.id", ondelete="CASCADE"), nullable=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     content = Column(String(2000), nullable=False)
-    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"), index=True)
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"))
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
     post = relationship("Post", back_populates="replies")
     owner = relationship("User", back_populates="replies")
@@ -198,6 +198,6 @@ class PostShare(Base):
     id = Column(Integer, primary_key=True, nullable=False)
     post_id = Column(Integer, ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()"), index=True)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
 
     post = relationship("Post", back_populates="shares")

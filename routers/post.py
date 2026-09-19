@@ -210,7 +210,7 @@ async def create_posts(
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_posts(id: int, db: Session = Depends(get_db),
-                 current_user: int = Depends(oauth2.get_current_user)):  
+                 current_user: models.User = Depends(oauth2.get_current_user)):  
     deleted_post = db.query(models.Post).filter(models.Post.id == id).first()
     
     if not deleted_post:
@@ -228,7 +228,7 @@ def delete_posts(id: int, db: Session = Depends(get_db),
 
 @router.put("/{id}", status_code=status.HTTP_200_OK, response_model=schemas.Post)
 def update_post(id: int, post: schemas.PostCreate, db: Session = Depends(get_db),
-                current_user: int = Depends(oauth2.get_current_user)):  
+                current_user: models.User = Depends(oauth2.get_current_user)):  
     updated_post = db.query(models.Post).filter(models.Post.id == id).first()
     if not updated_post:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Post with id {id} not found")
@@ -252,18 +252,18 @@ def update_post(id: int, post: schemas.PostCreate, db: Session = Depends(get_db)
 
 @router.get("/", response_model=list[schemas.PostOut]) 
 def get_posts(db: Session = Depends(get_db),
-              limit:int =10,
-              skip:int=0,
-              search: Optional[str]=""):
-    results = (
+              limit: int = 10,
+              skip: int = 0,
+              search: Optional[str] = ""):
+    query = (
         db.query(models.Post, func.count(models.Vote.post_id).label("votes"))
         .join(models.Vote, models.Vote.post_id == models.Post.id, isouter=True)
+        .filter(models.Post.published.is_(True))
         .group_by(models.Post.id)
-        .filter(models.Post.published.is_(True), models.Post.title.ilike(f"%{search}%"))
-        .limit(limit)
-        .offset(skip)
-        .all()
     )
+    if search and search.strip():
+        query = query.filter(models.Post.title.ilike(f"%{search.strip()}%"))
+    results = query.limit(limit).offset(skip).all()
     # db.query(Post, votes) returns tuples, but response_model expects objects
     return [{"Post": post, "votes": votes} for post, votes in results]
 

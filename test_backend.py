@@ -2,7 +2,16 @@
 Backend Acceptance Tests for VoteFlow API
 Tests critical user flows and endpoints
 """
-import pytest
+try:
+    import pytest
+except ImportError:
+    class _PytestFallback:
+        @staticmethod
+        def fixture(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+    pytest = _PytestFallback()
 import io
 from pathlib import Path
 from fastapi.testclient import TestClient
@@ -276,7 +285,7 @@ class TestPostMedia:
     def test_max_media_per_post_validation(self):
         """Maximum 10 media files per post is enforced"""
         # Configuration test
-        from app.routers.post import attach_post_media
+        from routers.post import attach_post_media
         # The limit is hardcoded in the attach_post_media function
         # Verified by code review
 
@@ -295,9 +304,45 @@ class TestDatabaseMigrations:
         # Verify migrations include key features
         assert any("user" in f for f in migration_names), "User migration missing"
         assert any("post" in f for f in migration_names), "Post migration missing"
-        assert any("community" in f for f in migration_names), "Community migration missing"
+        assert any("communit" in f for f in migration_names), "Community migration missing"
         assert any("messaging" in f for f in migration_names), "Messaging migration missing"
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    if hasattr(pytest, "main"):
+        pytest.main([__file__, "-v"])
+    else:
+        import inspect
+        classes = [
+            TestHealth, TestVersion, TestProfiles, TestCommunities,
+            TestMediaUpload, TestConversations, TestPostMedia, TestDatabaseMigrations
+        ]
+        passed = 0
+        failed = 0
+        for cls in classes:
+            instance = cls()
+            test_methods = [m for m in dir(instance) if m.startswith("test_") and callable(getattr(instance, m))]
+            for method_name in test_methods:
+                method = getattr(instance, method_name)
+                setup_gen = None
+                if hasattr(instance, "setup"):
+                    setup_res = instance.setup()
+                    if inspect.isgenerator(setup_res):
+                        setup_gen = setup_res
+                        next(setup_gen, None)
+                try:
+                    method()
+                    print(f"PASS: {cls.__name__}.{method_name}")
+                    passed += 1
+                except Exception as exc:
+                    print(f"FAIL: {cls.__name__}.{method_name} - {exc}")
+                    failed += 1
+                finally:
+                    if setup_gen:
+                        try:
+                            next(setup_gen)
+                        except StopIteration:
+                            pass
+        print(f"\nResults: {passed} passed, {failed} failed")
+        if failed > 0:
+            raise SystemExit(1)

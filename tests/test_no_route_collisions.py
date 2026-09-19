@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from app.main import app
 
 
@@ -14,3 +19,8 @@ def test_no_ambiguous_routes():
                     f"({seen[key].__name__} vs {route.endpoint.__name__})"
                 )
             seen[key] = route.endpoint
+
+
+if __name__ == "__main__":
+    test_no_ambiguous_routes()
+    print("PASS: test_no_ambiguous_routes - No route collisions detected!")

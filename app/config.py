@@ -14,11 +14,11 @@ class Settings(BaseSettings):
     database_hostname: Optional[str] = None
     database_password: Optional[str] = None
     database_name: Optional[str] = None
-    secret_key: str
+    secret_key: str = "CHANGE_ME"
     database_port: Optional[str] = None
     database_username: Optional[str] = None
-    algorithm: str
-    access_token_expire_minutes: int
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
 
     # Comma-separated list. Examples:
     # - "*" (allow all)

@@ -38,3 +38,8 @@ def test_user_profile_followers_routes_do_not_collide():
         "username": "alice",
     }
     assert client.get("/users/42/followers").json() == {"handler": "user.get_followers", "id": 42}
+
+
+if __name__ == "__main__":
+    test_user_profile_followers_routes_do_not_collide()
+    print("PASS: test_user_profile_followers_routes_do_not_collide!")

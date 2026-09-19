@@ -261,6 +261,13 @@ class UserCreate(BaseModel):
     email: str
     password: str = Field(max_length=72, description="Must be at most 72 characters")
 
+    @field_validator("password")
+    @classmethod
+    def validate_password_bytes(cls, v: str) -> str:
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("Password cannot exceed 72 bytes")
+        return v
+
 class UserLogin(BaseModel):
     email: str
     password: str

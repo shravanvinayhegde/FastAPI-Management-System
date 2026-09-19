@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app import models, schemas
@@ -43,7 +43,6 @@ def mark_read(
         models.Notification.recipient_id == current_user.id,
     ).first()
     if notification is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Notification not found")
     notification.is_read = True
     db.commit()
