@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-
 import boto3
-from botocore.config import Config
 
 from app.config import settings
 
@@ -24,9 +22,6 @@ def _client():
         endpoint_url=settings.s3_endpoint_url,
         aws_access_key_id=settings.s3_access_key_id,
         aws_secret_access_key=settings.s3_secret_access_key,
-        config=Config(
-            s3={"addressing_style": "path"},
-        ),
     )
 
 
@@ -47,10 +42,7 @@ def save_bytes(key: str, data: bytes, content_type: str) -> None:
 
 def delete_bytes(key: str) -> None:
     if uses_object_storage():
-        _client().delete_object(
-            Bucket=settings.s3_bucket,
-            Key=key,
-        )
+        _client().delete_object(Bucket=settings.s3_bucket, Key=key)
         return
 
     (settings.media_directory / key).unlink(missing_ok=True)
