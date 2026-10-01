@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     max_video_upload_mb: int = 100
     max_image_dimension: int = 4096
     frontend_url: Optional[str] = None
+    render: bool = Field(default=False, validation_alias=AliasChoices("RENDER"))
 
     model_config = SettingsConfigDict(env_file=Path(__file__).parent.parent / ".env")
 

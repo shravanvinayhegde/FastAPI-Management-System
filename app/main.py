@@ -41,6 +41,7 @@ class UnhandledErrorMiddleware:
 
 
 app.add_middleware(UnhandledErrorMiddleware)
+storage.validate_configuration()
 
 if storage.uses_object_storage():
     @app.get("/media/{key:path}")

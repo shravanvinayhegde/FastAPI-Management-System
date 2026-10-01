@@ -24,6 +24,25 @@ def uses_object_storage() -> bool:
     )
 
 
+def validate_configuration() -> None:
+    configured_values = {
+        "S3_BUCKET": settings.s3_bucket,
+        "S3_ACCESS_KEY_ID": settings.s3_access_key_id,
+        "S3_SECRET_ACCESS_KEY": settings.s3_secret_access_key,
+        "S3_ENDPOINT_URL": settings.s3_endpoint_url,
+        "S3_REGION": settings.s3_region,
+    }
+    if not any(configured_values.values()):
+        return
+
+    missing = [name for name, value in configured_values.items() if not value]
+    if missing:
+        message = "Incomplete object-storage configuration; missing: " + ", ".join(missing)
+        logger.error(message)
+        if settings.render:
+            raise RuntimeError(message)
+
+
 @lru_cache
 def _client():
     logger.info(
