@@ -5,6 +5,7 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import func
 from sqlalchemy.orm import Session, aliased
 from PIL import Image, UnidentifiedImageError
@@ -182,9 +183,11 @@ async def upload_avatar(
     extension = ALLOWED_AVATAR_FORMATS[image_format]
     content_type = f"image/{extension}" if extension != "jpg" else "image/jpeg"
     try:
-        storage.save_bytes(f"avatars/{filename}", data, content_type)
+        await run_in_threadpool(storage.save_bytes, f"avatars/{filename}", data, content_type)
     except storage.StorageError as exc:
-        raise HTTPException(status_code=503, detail="Media storage is unavailable") from exc
+        raise HTTPException(
+            status_code=503, detail=f"Media storage is unavailable ({exc.code})"
+        ) from exc
     current_user.avatar_url = f"/media/avatars/{filename}"
     current_user.avatar_type = "uploaded"
     db.commit()

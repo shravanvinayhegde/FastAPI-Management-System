@@ -8,6 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from PIL import Image, UnidentifiedImageError
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -113,14 +114,18 @@ async def _store_post_media(file: UploadFile) -> schemas.MediaUploadOut:
 
     filename = f"{uuid.uuid4().hex}.{extension.lstrip('.')}"
     try:
-        storage.save_bytes(f"posts/{filename}", data, mime_type)
+        await run_in_threadpool(storage.save_bytes, f"posts/{filename}", data, mime_type)
     except storage.StorageError as exc:
-        logger.exception(
-            "Media upload failed: filename=%s content_type=%s",
+        logger.error(
+            "Media upload failed: filename=%s content_type=%s code=%s hint=%s",
             file.filename,
             file.content_type,
+            exc.code,
+            exc.hint or "-",
         )
-        raise HTTPException(status_code=503, detail="Media storage upload failed") from exc
+        raise HTTPException(
+            status_code=503, detail=f"Media storage upload failed ({exc.code})"
+        ) from exc
     return schemas.MediaUploadOut(
         url=f"/media/posts/{filename}",
         media_type=media_type,
@@ -290,7 +295,7 @@ async def create_posts(
         )
         raise HTTPException(
             status_code=500,
-            detail="Failed to create post with media",
+            detail=f"Failed to create post with media ({type(exc).__name__})",
         )
 
 

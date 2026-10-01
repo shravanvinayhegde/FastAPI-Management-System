@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -8,7 +8,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.config import settings
 from app import storage
-from routers import auth, chat, community, notification, post, profile, user, vote
+from routers import auth, chat, community, notification, oauth2, post, profile, user, vote
 
 logger = logging.getLogger("voteflow")
 app = FastAPI()
@@ -46,7 +46,11 @@ storage.validate_configuration()
 if storage.uses_object_storage():
     @app.get("/media/{key:path}")
     def media_redirect(key: str):
-        return RedirectResponse(storage.public_url(key))
+        try:
+            target = storage.media_url(key)
+        except storage.StorageError as exc:
+            raise HTTPException(status_code=503, detail="Media storage is unavailable") from exc
+        return RedirectResponse(target, headers={"Cache-Control": "private, max-age=300"})
 else:
     settings.media_directory.mkdir(parents=True, exist_ok=True)
     (settings.media_directory / "avatars").mkdir(parents=True, exist_ok=True)
@@ -66,6 +70,12 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/health/storage")
+def storage_health(current_user=Depends(oauth2.get_current_user)):
+    """Run a real storage round-trip and report the failing step without secrets."""
+    return storage.diagnose()
 
 
 @app.get("/version")

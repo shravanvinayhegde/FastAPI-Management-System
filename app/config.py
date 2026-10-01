@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -61,6 +61,32 @@ class Settings(BaseSettings):
     render: bool = Field(default=False, validation_alias=AliasChoices("RENDER"))
 
     model_config = SettingsConfigDict(env_file=Path(__file__).parent.parent / ".env")
+
+    @field_validator(
+        "s3_bucket",
+        "s3_region",
+        "s3_endpoint_url",
+        "s3_access_key_id",
+        "s3_secret_access_key",
+        "s3_public_base_url",
+        mode="before",
+    )
+    @classmethod
+    def _clean_s3_value(cls, value):
+        """Trim pasted S3 values and treat blank values as unset."""
+        if value is None:
+            return None
+        value = str(value).strip().strip("\"'")
+        return value or None
+
+    @field_validator("s3_endpoint_url", "s3_public_base_url", mode="after")
+    @classmethod
+    def _normalise_url(cls, value):
+        if not value:
+            return value
+        if not value.lower().startswith(("http://", "https://")):
+            value = f"https://{value}"
+        return value.rstrip("/")
 
     @property
     def cors_origins_list(self) -> List[str]:
