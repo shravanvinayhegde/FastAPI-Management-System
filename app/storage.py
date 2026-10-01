@@ -1,4 +1,5 @@
 from __future__ import annotations
+from botocore.config import Config
 
 from functools import lru_cache
 
@@ -24,10 +25,13 @@ def uses_object_storage() -> bool:
 def _client():
     return boto3.client(
         "s3",
-        region_name=settings.s3_region or ("auto" if settings.s3_endpoint_url else "us-east-1"),
+        region_name=settings.s3_region or "us-east-2",
         endpoint_url=settings.s3_endpoint_url,
         aws_access_key_id=settings.s3_access_key_id,
         aws_secret_access_key=settings.s3_secret_access_key,
+        config=Config(
+            s3={"addressing_style": "path"},
+        ),
     )
 
 
