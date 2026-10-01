@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # Comma-separated list. Examples:
     # - "*" (allow all)
     # - "http://localhost:3000,https://myapp.com"
-    cors_origins: Optional[str] = "http://localhost:3000"
+    cors_origins: Optional[str] = "https://voteflow-phi.vercel.app"
 
     # Local disk fallback when S3/R2 env vars are unset. Public contract remains /media/...
     media_directory: Path = Path("media")
