@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import json
+import logging
 import uuid
 from io import BytesIO
 from pathlib import Path
@@ -17,6 +18,7 @@ from app.database import get_db
 from routers import oauth2
 
 router = APIRouter(prefix="/posts", tags=["Posts"])
+logger = logging.getLogger("voteflow.posts")
 ALLOWED_IMAGE_FORMATS = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime"}
 
@@ -113,7 +115,12 @@ async def _store_post_media(file: UploadFile) -> schemas.MediaUploadOut:
     try:
         storage.save_bytes(f"posts/{filename}", data, mime_type)
     except storage.StorageError as exc:
-        raise HTTPException(status_code=503, detail="Media storage is unavailable") from exc
+        logger.exception(
+            "Media upload failed: filename=%s content_type=%s",
+            file.filename,
+            file.content_type,
+        )
+        raise HTTPException(status_code=503, detail="Media storage upload failed") from exc
     return schemas.MediaUploadOut(
         url=f"/media/posts/{filename}",
         media_type=media_type,
@@ -246,11 +253,35 @@ async def create_posts(
         _ = new_post.owner
         _ = new_post.media
         return new_post
+    except HTTPException:
+        db.rollback()
+        for key in stored_keys:
+            try:
+                storage.delete_bytes(key)
+            except Exception:
+                logger.exception(
+                    "Failed to clean up uploaded media after HTTP error: key=%s",
+                    key,
+                )
+        raise
     except Exception:
         db.rollback()
         for key in stored_keys:
-            storage.delete_bytes(key)
-        raise
+            try:
+                storage.delete_bytes(key)
+            except Exception:
+                logger.exception(
+                    "Failed to clean up uploaded media after database error: key=%s",
+                    key,
+                )
+        logger.exception(
+            "Failed to create post with media: user_id=%s",
+            current_user.id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create post with media",
+        )
 
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
