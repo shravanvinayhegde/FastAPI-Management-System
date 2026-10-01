@@ -66,7 +66,7 @@ class User(Base):
     show_posts = Column(Boolean, nullable=False, default=True, server_default="true")
     show_communities = Column(Boolean, nullable=False, default=True, server_default="true")
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
     followers = relationship(
         "User",
         secondary=user_follows,
@@ -102,7 +102,7 @@ class Community(Base):
     description = Column(String(500), nullable=False, default="", server_default="")
     creator_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     creator = relationship("User", back_populates="created_communities")
     members = relationship("User", secondary="community_members", back_populates="communities")
@@ -129,7 +129,7 @@ class Conversation(Base):
     user_one_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     user_two_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
     members = relationship("ConversationMember", back_populates="conversation", cascade="all, delete-orphan")
@@ -154,7 +154,7 @@ class Message(Base):
     content = Column(String(2000), nullable=False)
     shared_post_id = Column(Integer, ForeignKey("posts.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     conversation = relationship("Conversation", back_populates="messages")
     shared_post = relationship("Post")
@@ -183,7 +183,7 @@ class PostReply(Base):
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     content = Column(String(2000), nullable=False)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     post = relationship("Post", back_populates="replies")
     owner = relationship("User", back_populates="replies")

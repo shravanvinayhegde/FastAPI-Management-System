@@ -171,7 +171,7 @@ async def upload_avatar(
             image.verify()
             image_format = image.format
             width, height = image.size
-    except (UnidentifiedImageError, OSError):
+    except (UnidentifiedImageError, OSError, getattr(Image, "DecompressionBombError", OSError)):
         raise HTTPException(status_code=422, detail="Invalid image file")
     if image_format not in ALLOWED_AVATAR_FORMATS:
         raise HTTPException(status_code=422, detail="Only PNG, JPEG, and WebP avatars are supported")
@@ -301,11 +301,24 @@ def get_profile_likes(
 
 
 def _profile_users(db: Session, target_id: int, following: bool, skip: int, limit: int):
-    column = models.user_follows.c.following_id if following else models.user_follows.c.follower_id
-    join_column = models.user_follows.c.follower_id if following else models.user_follows.c.following_id
-    return db.query(models.User).join(models.user_follows, join_column == models.User.id).filter(
-        column == target_id,
+    if following:
+        join_column = models.user_follows.c.following_id
+        filter_column = models.user_follows.c.follower_id
+    else:
+        join_column = models.user_follows.c.follower_id
+        filter_column = models.user_follows.c.following_id
+    users = db.query(models.User).join(models.user_follows, join_column == models.User.id).filter(
+        filter_column == target_id,
     ).order_by(models.user_follows.c.created_at.desc(), models.User.id.desc()).offset(skip).limit(limit).all()
+    return [
+        schemas.PublicUser(
+            id=user.id,
+            username=user.username,
+            display_name=user.display_name,
+            avatar_url=_avatar_url(user),
+        )
+        for user in users
+    ]
 
 
 @router.get("/{username}/followers", response_model=list[schemas.PublicUser])

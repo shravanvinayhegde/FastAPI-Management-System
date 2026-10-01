@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -28,7 +29,9 @@ def _optional_current_user(
 
 
 def _slugify(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    normalized = unicodedata.normalize("NFKC", name.strip().lower())
+    slug = re.sub(r"[^\w]+", "-", normalized).replace("_", "-")
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
     if not slug:
         raise HTTPException(status_code=422, detail="Community name must contain letters or numbers")
     return slug
@@ -79,9 +82,7 @@ def create_community(
     if not name:
         raise HTTPException(status_code=422, detail="Community name cannot be blank")
     slug = _slugify(name)
-    duplicate = db.query(models.Community).filter(
-        func.lower(models.Community.name) == name.lower()
-    ).first()
+    duplicate = db.query(models.Community).filter(func.lower(models.Community.name) == name.lower()).first()
     if duplicate or db.query(models.Community).filter(models.Community.slug == slug).first():
         raise HTTPException(status_code=409, detail="Community name or slug already exists")
 
@@ -94,10 +95,7 @@ def create_community(
     db.add(new_community)
     try:
         db.flush()
-        db.execute(models.community_members.insert().values(
-            user_id=current_user.id,
-            community_id=new_community.id,
-        ))
+        db.execute(models.community_members.insert().values(user_id=current_user.id, community_id=new_community.id))
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -133,7 +131,7 @@ def get_community_by_slug(
     return _community_response(db, community, current_user)
 
 
-@router.get("/{community_id}", response_model=schemas.CommunityOut)
+@router.get("/{community_id:int}", response_model=schemas.CommunityOut)
 def get_community(
     community_id: int,
     db: Session = Depends(get_db),
@@ -142,7 +140,7 @@ def get_community(
     return _community_response(db, _get_community(db, community_id), current_user)
 
 
-@router.post("/{community_id}/join", response_model=schemas.CommunityOut)
+@router.post("/{community_id:int}/join", response_model=schemas.CommunityOut)
 def join_community(
     community_id: int,
     db: Session = Depends(get_db),
@@ -160,28 +158,31 @@ def join_community(
     return _community_response(db, community, current_user)
 
 
-@router.delete("/{community_id}/join", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{community_id:int}/join", status_code=status.HTTP_204_NO_CONTENT)
 def leave_community(
     community_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(oauth2.get_current_user),
 ):
     _get_community(db, community_id)
-    result = db.execute(models.community_members.delete().where(
-        models.community_members.c.community_id == community_id,
-        models.community_members.c.user_id == current_user.id,
-    ))
+    result = db.execute(
+        models.community_members.delete().where(
+            models.community_members.c.community_id == community_id,
+            models.community_members.c.user_id == current_user.id,
+        )
+    )
     if result.rowcount == 0:
         raise HTTPException(status_code=404, detail="Membership does not exist")
     db.commit()
 
 
-@router.get("/{community_id}/members", response_model=list[schemas.UserOut])
+@router.get("/{community_id:int}/members", response_model=list[schemas.UserPublic])
 def list_members(
     community_id: int,
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(oauth2.get_current_user),
 ):
     _get_community(db, community_id)
     return db.query(models.User).join(
@@ -192,7 +193,7 @@ def list_members(
     ).order_by(models.community_members.c.joined_at.asc(), models.User.id.asc()).offset(skip).limit(limit).all()
 
 
-@router.get("/{community_id}/posts", response_model=list[schemas.PostOut])
+@router.get("/{community_id:int}/posts", response_model=list[schemas.PostOut])
 def list_community_posts(
     community_id: int,
     sort: str = Query("new", pattern="^(new|top|hot)$"),

@@ -2,7 +2,9 @@
 Backend Acceptance Tests for VoteFlow API
 Tests critical user flows and endpoints
 """
+
 try:
+    # pyrefly: ignore [missing-import]
     import pytest
 except ImportError:
     class _PytestFallback:

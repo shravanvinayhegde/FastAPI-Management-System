@@ -1,8 +1,18 @@
 import json
-
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, conint, model_validator
 from datetime import datetime
 from typing import Optional
+
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    conint,
+    field_validator,
+    model_validator,
+)
+
 
 class PostBase(BaseModel):
     title: str
@@ -12,14 +22,34 @@ class PostBase(BaseModel):
     image_url: Optional[AnyHttpUrl] = None
     video_url: Optional[AnyHttpUrl] = None
 
+
 class PostCreate(PostBase):
     pass
 
 
-class UserOut(BaseModel):  
+class PostUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    published: Optional[bool] = None
+
+
+class UserOut(BaseModel):
     id: int
     username: Optional[str] = None
     email: str
+    created_at: datetime
+    display_name: Optional[str] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
+    profile_visibility: Optional[str] = None
+    show_posts: Optional[bool] = None
+    show_communities: Optional[bool] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserPublic(BaseModel):
+    id: int
+    username: Optional[str] = None
     created_at: datetime
     display_name: Optional[str] = None
     bio: Optional[str] = None
@@ -97,8 +127,7 @@ class PublicUser(BaseModel):
     id: int
     username: str
     display_name: str
-    avatar_url: str
-
+    avatar_url: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -152,7 +181,6 @@ class SharedPostPreview(BaseModel):
     media: list[PostMediaOut] = []
     community: Optional[CommunityOut] = None
     created_at: datetime
-
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -239,27 +267,34 @@ class ShareOut(BaseModel):
     shared: bool
     share_count: int
     url: Optional[str] = None
-    
+
 
 class Post(PostBase):
-    id: int          
+    id: int
     created_at: datetime
-    owner_id:int
-    owner:PostOwner
+    owner_id: int
+    owner: PostOwner
     media: list[PostMediaOut] = []
-
+    voted: Optional[bool] = None
     model_config = ConfigDict(from_attributes=True)
+
 
 class PostOut(BaseModel):
     Post: Post
     votes: int
-
+    voted: Optional[bool] = None
     model_config = ConfigDict(from_attributes=True)
+
 
 class UserCreate(BaseModel):
     username: Optional[str] = Field(default=None, min_length=3, max_length=50, pattern="^[a-zA-Z0-9_]+$")
-    email: str
-    password: str = Field(max_length=72, description="Must be at most 72 characters")
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=72, description="Must be 8-72 characters")
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: EmailStr) -> str:
+        return str(v).strip().lower()
 
     @field_validator("password")
     @classmethod
@@ -268,21 +303,24 @@ class UserCreate(BaseModel):
             raise ValueError("Password cannot exceed 72 bytes")
         return v
 
+
 class UserLogin(BaseModel):
     email: str
     password: str
 
-class Token(BaseModel):    
+
+class Token(BaseModel):
     access_token: str
     token_type: str
+
 
 class TokenData(BaseModel):
     id: Optional[int] = None
 
 
-class Vote(BaseModel):  
+class Vote(BaseModel):
     post_id: int
-    dir: conint(ge=0, le=1)   # type: ignore
+    dir: conint(ge=0, le=1)  # type: ignore
 
 
 class VoteStatus(BaseModel):

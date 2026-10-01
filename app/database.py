@@ -1,3 +1,5 @@
+import os
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from .config import settings
@@ -35,6 +37,13 @@ def _build_sqlalchemy_database_url() -> str:
 
 
 SQLALCHEMY_DATABASE_URL = _build_sqlalchemy_database_url()
+
+if os.getenv("RENDER") and SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+    raise RuntimeError(
+        "No database configuration found while running on Render (DATABASE_URL, or "
+        "DATABASE_HOSTNAME/DATABASE_PORT/DATABASE_USERNAME/DATABASE_PASSWORD/DATABASE_NAME, "
+        "must be set). Refusing to fall back to local SQLite in production."
+    )
 
 connect_args = {"check_same_thread": False} if SQLALCHEMY_DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args=connect_args)

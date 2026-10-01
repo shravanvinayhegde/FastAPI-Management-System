@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.database import SessionLocal, get_db
 from routers import oauth2
+from routers.profile import _avatar_url
 
 router = APIRouter(tags=["Messaging"])
 
@@ -96,7 +97,7 @@ def _conversation_response(db: Session, conversation: models.Conversation, user_
             id=other.id,
             username=other.username,
             display_name=other.display_name,
-            avatar_url=other.avatar_url or "",
+            avatar_url=_avatar_url(other),
         ),
         last_message=schemas.MessageOut.model_validate(last_message) if last_message else None,
         unread_count=unread_query.scalar() or 0,
@@ -121,7 +122,7 @@ def create_conversation(
         models.Conversation.user_two_id == user_two_id,
     ).first()
     if conversation:
-        return conversation
+        return _conversation_response(db, conversation, current_user.id)
 
     conversation = models.Conversation(user_one_id=user_one_id, user_two_id=user_two_id)
     db.add(conversation)
@@ -249,6 +250,12 @@ def mark_conversation_read(
         models.ConversationMember.user_id == current_user.id,
     ).first()
     member.last_read_at = datetime.now(timezone.utc)
+    db.query(models.Notification).filter(
+        models.Notification.recipient_id == current_user.id,
+        models.Notification.entity_type == "conversation",
+        models.Notification.entity_id == conversation_id,
+        models.Notification.is_read.is_(False),
+    ).update({models.Notification.is_read: True}, synchronize_session=False)
     db.commit()
 
 
@@ -294,6 +301,7 @@ async def websocket_events(websocket: WebSocket, token: Optional[str] = None):
     if not token:
         await websocket.close(code=1008)
         return
+
     db = SessionLocal()
     user_id: Optional[int] = None
     try:
@@ -304,6 +312,8 @@ async def websocket_events(websocket: WebSocket, token: Optional[str] = None):
             await websocket.close(code=1008)
             return
         user_id = user.id
+        db.close()
+        db = None
         await manager.connect(user_id, websocket)
         while True:
             await websocket.receive_text()
@@ -314,4 +324,5 @@ async def websocket_events(websocket: WebSocket, token: Optional[str] = None):
     finally:
         if user_id is not None:
             manager.disconnect(user_id, websocket)
-        db.close()
+        if db is not None:
+            db.close()

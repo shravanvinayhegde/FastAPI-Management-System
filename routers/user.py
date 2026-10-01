@@ -1,18 +1,20 @@
-import re
 import json
+import re
 
-from fastapi import status, HTTPException, Depends, APIRouter, Query, BackgroundTasks
-from app import models, schemas, utility
-from app.database import get_db
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import delete, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from app import models, schemas, utility
+from app.database import get_db
 from routers import oauth2
 from routers.chat import manager
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
-@router.get("/", response_model=list[schemas.UserOut])
+
+@router.get("/", response_model=list[schemas.UserPublic])
 def get_all_users(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
@@ -21,9 +23,10 @@ def get_all_users(
 ):
     return db.query(models.User).order_by(models.User.id).offset(skip).limit(limit).all()
 
+
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=schemas.UserOut)
 def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    hashed_password = utility.hash(user.password)  # cleaner utility call
+    hashed_password = utility.hash(user.password)
     requested_username = user.username or user.email.split("@", 1)[0]
     username = re.sub(r"[^a-zA-Z0-9_]+", "_", requested_username).strip("_").lower()[:50]
     if len(username) < 3:
@@ -48,20 +51,21 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db.refresh(new_user)
     return new_user
 
+
 @router.get("/me", response_model=schemas.UserOut)
 def get_me(current_user: models.User = Depends(oauth2.get_current_user)):
     return current_user
 
-@router.get("/{id:int}", response_model=schemas.UserOut)
+
+@router.get("/{id:int}", response_model=schemas.UserPublic)
 def get_user(
     id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(oauth2.get_current_user)
+    current_user: models.User = Depends(oauth2.get_current_user),
 ):
     user = db.query(models.User).filter(models.User.id == id).first()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail=f"User with id {id} does not exist")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"User with id {id} does not exist")
     if user.profile_visibility == "private" and current_user.id != user.id:
         follows = db.query(models.user_follows).filter(
             models.user_follows.c.follower_id == current_user.id,
@@ -108,10 +112,7 @@ def _get_follow_status(db: Session, current_user_id: int, target_user_id: int) -
 def _get_target_user(db: Session, user_id: int) -> models.User:
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User with id {user_id} does not exist",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"User with id {user_id} does not exist")
     return user
 
 
@@ -124,16 +125,10 @@ def follow_user(
 ):
     _get_target_user(db, id)
     if current_user.id == id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Users cannot follow themselves",
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Users cannot follow themselves")
 
     try:
-        db.execute(models.user_follows.insert().values(
-            follower_id=current_user.id,
-            following_id=id,
-        ))
+        db.execute(models.user_follows.insert().values(follower_id=current_user.id, following_id=id))
         notification = models.Notification(
             recipient_id=id,
             actor_id=current_user.id,
@@ -149,15 +144,16 @@ def follow_user(
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="User is already followed",
-        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User is already followed")
     db.refresh(notification)
-    background_tasks.add_task(manager.send_to_user, id, {
-        "type": "notification",
-        "notification": schemas.NotificationOut.model_validate(notification).model_dump(mode="json"),
-    })
+    background_tasks.add_task(
+        manager.send_to_user,
+        id,
+        {
+            "type": "notification",
+            "notification": schemas.NotificationOut.model_validate(notification).model_dump(mode="json"),
+        },
+    )
     return _get_follow_status(db, current_user.id, id)
 
 
@@ -168,15 +164,14 @@ def unfollow_user(
     current_user: models.User = Depends(oauth2.get_current_user),
 ):
     _get_target_user(db, id)
-    result = db.execute(delete(models.user_follows).where(
-        models.user_follows.c.follower_id == current_user.id,
-        models.user_follows.c.following_id == id,
-    ))
-    if result.rowcount == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Follow relationship does not exist",
+    result = db.execute(
+        delete(models.user_follows).where(
+            models.user_follows.c.follower_id == current_user.id,
+            models.user_follows.c.following_id == id,
         )
+    )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Follow relationship does not exist")
     db.commit()
     return _get_follow_status(db, current_user.id, id)
 
@@ -191,7 +186,7 @@ def get_follow_status(
     return _get_follow_status(db, current_user.id, id)
 
 
-@router.get("/{id:int}/followers", response_model=list[schemas.UserOut])
+@router.get("/{id:int}/followers", response_model=list[schemas.UserPublic])
 def get_followers(
     id: int,
     skip: int = Query(0, ge=0),
@@ -208,7 +203,7 @@ def get_followers(
     ).order_by(models.user_follows.c.created_at.desc()).offset(skip).limit(limit).all()
 
 
-@router.get("/{id:int}/following", response_model=list[schemas.UserOut])
+@router.get("/{id:int}/following", response_model=list[schemas.UserPublic])
 def get_following(
     id: int,
     skip: int = Query(0, ge=0),
@@ -223,3 +218,4 @@ def get_following(
     ).filter(
         models.user_follows.c.follower_id == id,
     ).order_by(models.user_follows.c.created_at.desc()).offset(skip).limit(limit).all()
+

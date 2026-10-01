@@ -3,17 +3,18 @@ import json
 import uuid
 from io import BytesIO
 from pathlib import Path
-
-from fastapi import status, HTTPException, Depends, APIRouter, Query, File, Form, UploadFile
-from PIL import Image, UnidentifiedImageError
-from app import models, schemas, storage
-from app.database import get_db
-from app.config import settings
-from sqlalchemy.orm import Session
-from routers import oauth2
 from typing import Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, joinedload, selectinload
+
+from app import models, schemas, storage
+from app.config import settings
+from app.database import get_db
+from routers import oauth2
 
 router = APIRouter(prefix="/posts", tags=["Posts"])
 ALLOWED_IMAGE_FORMATS = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}
@@ -26,6 +27,47 @@ def _post_values(post: schemas.PostCreate) -> dict:
         if values[field] is not None:
             values[field] = str(values[field])
     return values
+
+
+def _optional_current_user(
+    token: Optional[str] = Depends(oauth2.optional_oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> Optional[models.User]:
+    if not token:
+        return None
+    try:
+        credentials_exception = HTTPException(status_code=401, detail="Not valid credentials")
+        token_data = oauth2.verify_access_token(token, credentials_exception)
+    except HTTPException:
+        return None
+    return db.query(models.User).filter(models.User.id == token_data.id).first()
+
+
+def _hydrate_posts(db: Session, results: list) -> list[dict]:
+    posts = [post for post, _ in results]
+    if posts:
+        loaded = db.query(models.Post).filter(models.Post.id.in_([p.id for p in posts])).options(
+            joinedload(models.Post.owner),
+            selectinload(models.Post.media),
+        ).all()
+        by_id = {p.id: p for p in loaded}
+        results = [(by_id[post.id], votes) for post, votes in results]
+    return [{"Post": post, "votes": votes} for post, votes in results]
+
+
+def _attach_voted(db: Session, items: list[dict], viewer: Optional[models.User]) -> list[dict]:
+    if viewer is None or not items:
+        return items
+    post_ids = [item["Post"].id for item in items]
+    voted_ids = {
+        row[0] for row in db.query(models.Vote.post_id).filter(
+            models.Vote.user_id == viewer.id,
+            models.Vote.post_id.in_(post_ids),
+        ).all()
+    }
+    for item in items:
+        item["voted"] = item["Post"].id in voted_ids
+    return items
 
 
 async def _store_post_media(file: UploadFile) -> schemas.MediaUploadOut:
@@ -45,7 +87,7 @@ async def _store_post_media(file: UploadFile) -> schemas.MediaUploadOut:
                 image.verify()
                 image_format = image.format
                 width, height = image.size
-        except (UnidentifiedImageError, OSError):
+        except (UnidentifiedImageError, OSError, getattr(Image, "DecompressionBombError", OSError)):
             raise HTTPException(status_code=422, detail="Invalid image file")
         if image_format not in ALLOWED_IMAGE_FORMATS:
             raise HTTPException(status_code=422, detail="Only PNG, JPEG, and WebP images are supported")
@@ -67,7 +109,7 @@ async def _store_post_media(file: UploadFile) -> schemas.MediaUploadOut:
         media_type = "video"
         mime_type = ALLOWED_VIDEO_EXTENSIONS[extension]
 
-    filename = f"{uuid.uuid4().hex}.{extension}"
+    filename = f"{uuid.uuid4().hex}.{extension.lstrip('.')}"
     storage.save_bytes(f"posts/{filename}", data, mime_type)
     return schemas.MediaUploadOut(
         url=f"/media/posts/{filename}",
@@ -91,14 +133,13 @@ async def attach_post_media(
         raise HTTPException(status_code=404, detail="Post not found")
     if post.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the post owner can attach media")
-    
-    # Check maximum media per post (limit to 10 files)
+
     existing_media_count = db.query(func.count(models.PostMedia.id)).filter(
         models.PostMedia.post_id == post_id
     ).scalar() or 0
     if existing_media_count >= 10:
         raise HTTPException(status_code=400, detail="Maximum 10 media files per post")
-    
+
     result = await _store_post_media(file)
     storage_key = result.url.removeprefix("/media/")
     try:
@@ -118,6 +159,7 @@ async def attach_post_media(
         raise
     return result
 
+
 @router.delete("/{post_id}/media/{media_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_post_media(
     post_id: int,
@@ -130,19 +172,18 @@ def delete_post_media(
         raise HTTPException(status_code=404, detail="Post not found")
     if post.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the post owner can delete media")
-    
+
     media = db.query(models.PostMedia).filter(
         models.PostMedia.id == media_id,
-        models.PostMedia.post_id == post_id
+        models.PostMedia.post_id == post_id,
     ).first()
     if media is None:
         raise HTTPException(status_code=404, detail="Media not found")
-    
+
     storage.delete_bytes(media.storage_key)
-    
-    # Delete database record
     db.delete(media)
     db.commit()
+
 
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=schemas.Post)
 async def create_posts(
@@ -208,75 +249,104 @@ async def create_posts(
             storage.delete_bytes(key)
         raise
 
+
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_posts(id: int, db: Session = Depends(get_db),
-                 current_user: models.User = Depends(oauth2.get_current_user)):  
+def delete_posts(
+    id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(oauth2.get_current_user),
+):
     deleted_post = db.query(models.Post).filter(models.Post.id == id).first()
-    
     if not deleted_post:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Post with id {id} not found")
-    
-    if deleted_post.owner_id != current_user.id: 
+    if deleted_post.owner_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not Authorised")
-    
-    # Delete associated media files
     for media in deleted_post.media:
         storage.delete_bytes(media.storage_key)
-    
     db.delete(deleted_post)
     db.commit()
 
+
 @router.put("/{id}", status_code=status.HTTP_200_OK, response_model=schemas.Post)
-def update_post(id: int, post: schemas.PostCreate, db: Session = Depends(get_db),
-                current_user: models.User = Depends(oauth2.get_current_user)):  
+def update_post(
+    id: int,
+    post: schemas.PostUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(oauth2.get_current_user),
+):
     updated_post = db.query(models.Post).filter(models.Post.id == id).first()
     if not updated_post:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Post with id {id} not found")
     if updated_post.owner_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not Authorised")
-    
-    # Only allow updates to title, content, and published status
-    # Media URLs should not be updated via PUT endpoint
-    if post.title and post.title.strip():
+
+    if post.title is not None and post.title.strip():
         updated_post.title = post.title.strip()
-    if post.content and post.content.strip():
+    if post.content is not None and post.content.strip():
         updated_post.content = post.content.strip()
-    updated_post.published = post.published
-    
+    if post.published is not None:
+        updated_post.published = post.published
+
     db.commit()
     db.refresh(updated_post)
-    # ensure relationship is loaded before session closes
     _ = updated_post.owner
     _ = updated_post.media
     return updated_post
 
-@router.get("/", response_model=list[schemas.PostOut]) 
-def get_posts(db: Session = Depends(get_db),
-              limit: int = 10,
-              skip: int = 0,
-              search: Optional[str] = ""):
+
+@router.get("/", response_model=list[schemas.PostOut])
+def get_posts(
+    db: Session = Depends(get_db),
+    limit: int = Query(10, ge=1, le=100),
+    skip: int = Query(0, ge=0),
+    search: Optional[str] = Query("", max_length=100),
+    sort: str = Query("new", pattern="^(new|top|hot)$"),
+    token: Optional[str] = Depends(oauth2.optional_oauth2_scheme),
+):
+    viewer = _optional_current_user(token=token, db=db)
     query = (
         db.query(models.Post, func.count(models.Vote.post_id).label("votes"))
-        .join(models.Vote, models.Vote.post_id == models.Post.id, isouter=True)
+        .outerjoin(models.Vote, models.Vote.post_id == models.Post.id)
         .filter(models.Post.published.is_(True))
         .group_by(models.Post.id)
     )
     if search and search.strip():
-        query = query.filter(models.Post.title.ilike(f"%{search.strip()}%"))
-    results = query.limit(limit).offset(skip).all()
-    # db.query(Post, votes) returns tuples, but response_model expects objects
-    return [{"Post": post, "votes": votes} for post, votes in results]
+        term = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.filter(models.Post.title.ilike(f"%{term}%", escape="\\"))
+    if sort == "top":
+        query = query.order_by(func.count(models.Vote.post_id).desc(), models.Post.created_at.desc(), models.Post.id.desc())
+    elif sort == "hot":
+        age_hours = func.extract("epoch", func.now() - models.Post.created_at) / 3600.0
+        hot_score = (func.count(models.Vote.post_id) + 1) / func.pow(age_hours + 2.0, 1.5)
+        query = query.order_by(hot_score.desc(), models.Post.created_at.desc(), models.Post.id.desc())
+    else:
+        query = query.order_by(models.Post.created_at.desc(), models.Post.id.desc())
+    results = query.offset(skip).limit(limit).all()
+    items = _hydrate_posts(db, results)
+    items = _attach_voted(db, items, viewer)
+    return items
 
 
 @router.get("/{post_id}", response_model=schemas.PostOut)
-def get_post(post_id: int, db: Session = Depends(get_db)):
-    result = db.query(models.Post, func.count(models.Vote.post_id).label("votes")).outerjoin(
+def get_post(
+    post_id: int,
+    db: Session = Depends(get_db),
+    token: Optional[str] = Depends(oauth2.optional_oauth2_scheme),
+):
+    viewer = _optional_current_user(token=token, db=db)
+    query = db.query(models.Post, func.count(models.Vote.post_id).label("votes")).outerjoin(
         models.Vote, models.Vote.post_id == models.Post.id,
-    ).filter(models.Post.id == post_id, models.Post.published.is_(True)).group_by(models.Post.id).first()
+    ).filter(models.Post.id == post_id)
+    if viewer is None:
+        query = query.filter(models.Post.published.is_(True))
+    else:
+        query = query.filter((models.Post.published.is_(True)) | (models.Post.owner_id == viewer.id))
+    result = query.group_by(models.Post.id).first()
     if result is None:
         raise HTTPException(status_code=404, detail="Post not found")
-    post, votes = result
-    return {"Post": post, "votes": votes}
+    item = {"Post": result[0], "votes": result[1]}
+    item = _attach_voted(db, [item], viewer)[0]
+    return item
 
 
 @router.post("/{post_id}/share", response_model=schemas.ShareOut)
@@ -315,6 +385,8 @@ def create_reply(
 ):
     post = db.query(models.Post).filter(models.Post.id == post_id).first()
     if post is None:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if not post.published and post.owner_id != current_user.id:
         raise HTTPException(status_code=404, detail="Post not found")
     content = reply.content.strip()
     if not content:

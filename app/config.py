@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -23,7 +24,7 @@ class Settings(BaseSettings):
     # Comma-separated list. Examples:
     # - "*" (allow all)
     # - "http://localhost:3000,https://myapp.com"
-    cors_origins: Optional[str] = None
+    cors_origins: Optional[str] = "http://localhost:3000"
 
     # Local disk fallback when S3/R2 env vars are unset. Public contract remains /media/...
     media_directory: Path = Path("media")
@@ -52,3 +53,9 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+if os.getenv("RENDER") and settings.secret_key == "CHANGE_ME":
+    raise RuntimeError(
+        "secret_key is still the default 'CHANGE_ME' value while running on Render. "
+        "Set the SECRET_KEY environment variable to a strong random value before deploying."
+    )

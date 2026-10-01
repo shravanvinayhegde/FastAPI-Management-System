@@ -1,0 +1,709 @@
+diff --git a/app/config.py b/app/config.py
+index bcc41db..1c2efa9 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import os
+ from pathlib import Path
+ from typing import List, Optional
+ 
+@@ -51,4 +52,12 @@ class Settings(BaseSettings):
+         return [o.strip() for o in raw.split(",") if o.strip()]
+ 
+ 
+-settings = Settings()
+\ No newline at end of file
++settings = Settings()
++
++# Fail fast rather than silently issuing forgeable tokens in production. Render sets
++# RENDER=true on every service; this only fires there, so local/dev runs are unaffected.
++if os.getenv("RENDER") and settings.secret_key == "CHANGE_ME":
++    raise RuntimeError(
++        "secret_key is still the default 'CHANGE_ME' value while running on Render. "
++        "Set the SECRET_KEY environment variable to a strong random value before deploying."
++    )
+\ No newline at end of file
+diff --git a/app/database.py b/app/database.py
+index d07ff54..bef7526 100644
+--- a/app/database.py
++++ b/app/database.py
+@@ -1,3 +1,5 @@
++import os
++
+ from sqlalchemy import create_engine
+ from sqlalchemy.orm import sessionmaker, declarative_base
+ from .config import settings
+@@ -36,6 +38,16 @@ def _build_sqlalchemy_database_url() -> str:
+ 
+ SQLALCHEMY_DATABASE_URL = _build_sqlalchemy_database_url()
+ 
++# Same idea as the secret_key guard: on Render, a missing DATABASE_URL/DATABASE_* config
++# should be a loud startup failure, not a quiet switch to a local SQLite file that is wiped
++# on every restart/deploy.
++if os.getenv("RENDER") and SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
++    raise RuntimeError(
++        "No database configuration found while running on Render (DATABASE_URL, or "
++        "DATABASE_HOSTNAME/DATABASE_PORT/DATABASE_USERNAME/DATABASE_PASSWORD/DATABASE_NAME, "
++        "must be set). Refusing to fall back to local SQLite in production."
++    )
++
+ connect_args = {"check_same_thread": False} if SQLALCHEMY_DATABASE_URL.startswith("sqlite") else {}
+ engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args=connect_args)
+ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+diff --git a/app/main.py b/app/main.py
+index 750bdd5..0aed4cb 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -1,13 +1,17 @@
+-from fastapi import FastAPI
++import logging
++
++from fastapi import FastAPI, Request
+ from fastapi.middleware.cors import CORSMiddleware
+-from fastapi.responses import RedirectResponse
++from fastapi.responses import JSONResponse, RedirectResponse
+ from fastapi.staticfiles import StaticFiles
++from starlette.types import ASGIApp, Receive, Scope, Send
+ 
+ from app.config import settings
+ from app import storage
+ from routers import auth, chat, community, notification, post, profile, user, vote
+ 
+ app = FastAPI()
++logger = logging.getLogger("voteflow")
+ 
+ if storage.uses_object_storage():
+     @app.get("/media/{key:path}")
+@@ -19,6 +23,49 @@ else:
+     (settings.media_directory / "posts").mkdir(parents=True, exist_ok=True)
+     app.mount("/media", StaticFiles(directory=str(settings.media_directory)), name="media")
+ 
++
++class UnhandledErrorMiddleware:
++    """Turns an unhandled exception into a normal 500 JSON response instead of letting it
++    reach Starlette's top-level error handler.
++
++    This has to be a plain ASGI middleware added *before* CORSMiddleware (see below for why
++    that ordering matters), not an `@app.exception_handler(Exception)` - FastAPI/Starlette
++    special-cases a handler registered for the bare `Exception` class and wires it into
++    ServerErrorMiddleware, which sits *outside* CORSMiddleware in the stack. A response built
++    there never passes back through CORSMiddleware, so it never gets an
++    Access-Control-Allow-Origin header - the browser reports a CORS failure instead of
++    showing the real error, no matter what the handler itself does.
++    """
++
++    def __init__(self, app: ASGIApp) -> None:
++        self.app = app
++
++    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
++        if scope["type"] != "http":
++            await self.app(scope, receive, send)
++            return
++        response_started = False
++
++        async def send_wrapper(message):
++            nonlocal response_started
++            if message["type"] == "http.response.start":
++                response_started = True
++            await send(message)
++
++        try:
++            await self.app(scope, receive, send_wrapper)
++        except Exception:
++            logger.exception("Unhandled error on %s %s", scope.get("method"), scope.get("path"))
++            if response_started:
++                raise
++            await JSONResponse(status_code=500, content={"detail": "Internal Server Error"})(scope, receive, send)
++
++
++# Registration order matters: add_middleware() inserts each new middleware innermost-first,
++# so the middleware added here (before CORSMiddleware) ends up *inside* it - meaning CORS
++# still gets to see and stamp the plain Response that UnhandledErrorMiddleware produces.
++app.add_middleware(UnhandledErrorMiddleware)
++
+ origins = settings.cors_origins_list
+ app.add_middleware(
+     CORSMiddleware,
+diff --git a/app/models.py b/app/models.py
+index eabfebd..de4a635 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -66,7 +66,7 @@ class User(Base):
+     show_posts = Column(Boolean, nullable=False, default=True, server_default="true")
+     show_communities = Column(Boolean, nullable=False, default=True, server_default="true")
+     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
++    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+     followers = relationship(
+         "User",
+         secondary=user_follows,
+@@ -102,7 +102,7 @@ class Community(Base):
+     description = Column(String(500), nullable=False, default="", server_default="")
+     creator_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
++    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+ 
+     creator = relationship("User", back_populates="created_communities")
+     members = relationship("User", secondary="community_members", back_populates="communities")
+@@ -129,7 +129,7 @@ class Conversation(Base):
+     user_one_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+     user_two_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
++    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+ 
+     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
+     members = relationship("ConversationMember", back_populates="conversation", cascade="all, delete-orphan")
+@@ -154,7 +154,7 @@ class Message(Base):
+     content = Column(String(2000), nullable=False)
+     shared_post_id = Column(Integer, ForeignKey("posts.id", ondelete="SET NULL"), nullable=True, index=True)
+     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
+-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
++    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+ 
+     conversation = relationship("Conversation", back_populates="messages")
+     shared_post = relationship("Post")
+@@ -183,7 +183,7 @@ class PostReply(Base):
+     owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+     content = Column(String(2000), nullable=False)
+     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), index=True)
+-    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
++    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+ 
+     post = relationship("Post", back_populates="replies")
+     owner = relationship("User", back_populates="replies")
+diff --git a/app/schemas.py b/app/schemas.py
+index 4c18457..59852fd 100644
+--- a/app/schemas.py
++++ b/app/schemas.py
+@@ -1,6 +1,6 @@
+ import json
+ 
+-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, conint, model_validator
++from pydantic import AnyHttpUrl, BaseModel, ConfigDict, EmailStr, Field, field_validator, conint, model_validator
+ from datetime import datetime
+ from typing import Optional
+ 
+@@ -16,6 +16,15 @@ class PostCreate(PostBase):
+     pass
+ 
+ 
++class PostUpdate(BaseModel):
++    """Partial update for PUT /posts/{id}. Unlike PostCreate, `published` defaults to
++    None (not True) so a request that omits it leaves the post's current published
++    state alone instead of silently re-publishing a draft."""
++    title: Optional[str] = None
++    content: Optional[str] = None
++    published: Optional[bool] = None
++
++
+ class UserOut(BaseModel):  
+     id: int
+     username: Optional[str] = None
+@@ -30,6 +39,23 @@ class UserOut(BaseModel):
+     model_config = ConfigDict(from_attributes=True)
+ 
+ 
++class UserPublic(BaseModel):
++    """Same as UserOut but without the email address, for endpoints that list or look up
++    other people (the user list, a single profile by id, followers/following, community
++    members). Email stays on UserOut, which is only returned for the signed-in user's own
++    account (registration response, /users/me, profile PATCH)."""
++    id: int
++    username: Optional[str] = None
++    created_at: datetime
++    display_name: Optional[str] = None
++    bio: Optional[str] = None
++    avatar_url: Optional[str] = None
++    profile_visibility: Optional[str] = None
++    show_posts: Optional[bool] = None
++    show_communities: Optional[bool] = None
++    model_config = ConfigDict(from_attributes=True)
++
++
+ class PostOwner(BaseModel):
+     id: int
+     username: str
+@@ -253,13 +279,21 @@ class Post(PostBase):
+ class PostOut(BaseModel):
+     Post: Post
+     votes: int
++    voted: Optional[bool] = None
+ 
+     model_config = ConfigDict(from_attributes=True)
+ 
+ class UserCreate(BaseModel):
+     username: Optional[str] = Field(default=None, min_length=3, max_length=50, pattern="^[a-zA-Z0-9_]+$")
+-    email: str
+-    password: str = Field(max_length=72, description="Must be at most 72 characters")
++    email: EmailStr
++    password: str = Field(min_length=8, max_length=72, description="Must be 8-72 characters")
++
++    @field_validator("email")
++    @classmethod
++    def normalize_email(cls, v: str) -> str:
++        # Store/compare emails case-insensitively so "Alice@x.com" and "alice@x.com"
++        # can't both register, and so login doesn't depend on the case someone types.
++        return v.strip().lower()
+ 
+     @field_validator("password")
+     @classmethod
+diff --git a/requirements.txt b/requirements.txt
+index aa206c1..3f8142f 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -7,6 +7,7 @@ boto3==1.37.38
+ cffi==2.0.0
+ cryptography==46.0.7
+ ecdsa==0.19.2
++email-validator==2.3.0
+ fastapi==0.135.3
+ greenlet==3.4.0
+ httpx==0.28.1
+diff --git a/routers/auth.py b/routers/auth.py
+index 90d0632..32e69af 100644
+--- a/routers/auth.py
++++ b/routers/auth.py
+@@ -1,4 +1,5 @@
+ from fastapi import APIRouter, Depends, status, HTTPException
++from sqlalchemy import func
+ from sqlalchemy.orm import Session
+ from app import database, schemas, models, utility
+ import routers.oauth2 as oauth2
+@@ -8,7 +9,12 @@ router = APIRouter(tags=["Authentication"])
+ 
+ @router.post("/login",response_model=schemas.Token)
+ def login(user_credentials: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(database.get_db)):
+-    user = db.query(models.User).filter(models.User.email == user_credentials.username).first()  
++    # Registration normalizes email to lowercase, so login must match case-insensitively
++    # too - otherwise someone who types their email in a different case than they
++    # registered with (or than an OAuth provider capitalized it) is told their
++    # credentials are wrong, when really it's just a case mismatch.
++    email = user_credentials.username.strip().lower()
++    user = db.query(models.User).filter(func.lower(models.User.email) == email).first()
+     if not user:
+         raise HTTPException(
+             status_code=status.HTTP_401_UNAUTHORIZED,
+diff --git a/routers/chat.py b/routers/chat.py
+index 264099b..1421dc4 100644
+--- a/routers/chat.py
++++ b/routers/chat.py
+@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
+ from app import models, schemas
+ from app.database import SessionLocal, get_db
+ from routers import oauth2
++from routers.profile import _avatar_url
+ 
+ router = APIRouter(tags=["Messaging"])
+ 
+@@ -96,7 +97,7 @@ def _conversation_response(db: Session, conversation: models.Conversation, user_
+             id=other.id,
+             username=other.username,
+             display_name=other.display_name,
+-            avatar_url=other.avatar_url or "",
++            avatar_url=_avatar_url(other),
+         ),
+         last_message=schemas.MessageOut.model_validate(last_message) if last_message else None,
+         unread_count=unread_query.scalar() or 0,
+@@ -121,7 +122,10 @@ def create_conversation(
+         models.Conversation.user_two_id == user_two_id,
+     ).first()
+     if conversation:
+-        return conversation
++        # Was returning the bare ORM object here, which doesn't satisfy the
++        # ConversationOut response_model (it has no other_user/last_message/unread_count
++        # attributes) and made every second "message" click on the same profile 500.
++        return _conversation_response(db, conversation, current_user.id)
+ 
+     conversation = models.Conversation(user_one_id=user_one_id, user_two_id=user_two_id)
+     db.add(conversation)
+@@ -249,6 +253,14 @@ def mark_conversation_read(
+         models.ConversationMember.user_id == current_user.id,
+     ).first()
+     member.last_read_at = datetime.now(timezone.utc)
++    # Opening a conversation should also clear the "new message" bell for it - otherwise
++    # the unread-notifications badge stays stuck even after the person has read the chat.
++    db.query(models.Notification).filter(
++        models.Notification.recipient_id == current_user.id,
++        models.Notification.entity_type == "conversation",
++        models.Notification.entity_id == conversation_id,
++        models.Notification.is_read.is_(False),
++    ).update({models.Notification.is_read: True}, synchronize_session=False)
+     db.commit()
+ 
+ 
+@@ -294,12 +306,19 @@ async def websocket_events(websocket: WebSocket, token: Optional[str] = None):
+     if not token:
+         await websocket.close(code=1008)
+         return
+-    db = SessionLocal()
+     user_id: Optional[int] = None
+     try:
+         credentials_exception = HTTPException(status_code=401, detail="Not valid credentials")
+         token_data = oauth2.verify_access_token(token, credentials_exception)
+-        user = db.query(models.User).filter(models.User.id == token_data.id).first()
++        # Only open a DB session for the moment it takes to check the token, then close
++        # it - a socket used to keep it (and its pooled connection) for as long as the
++        # socket stayed open, which for an idle "just listening" connection could be
++        # hours, tying up a connection from the pool the whole time for nothing.
++        db = SessionLocal()
++        try:
++            user = db.query(models.User).filter(models.User.id == token_data.id).first()
++        finally:
++            db.close()
+         if user is None:
+             await websocket.close(code=1008)
+             return
+@@ -314,4 +333,3 @@ async def websocket_events(websocket: WebSocket, token: Optional[str] = None):
+     finally:
+         if user_id is not None:
+             manager.disconnect(user_id, websocket)
+-        db.close()
+diff --git a/routers/community.py b/routers/community.py
+index 605283a..8eaa21a 100644
+--- a/routers/community.py
++++ b/routers/community.py
+@@ -1,4 +1,5 @@
+ import re
++import unicodedata
+ from typing import Optional
+ 
+ from fastapi import APIRouter, Depends, HTTPException, Query, status
+@@ -28,7 +29,12 @@ def _optional_current_user(
+ 
+ 
+ def _slugify(name: str) -> str:
+-    slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
++    # \w is Unicode-aware in Python 3, so letters/numbers from any script (Devanagari,
++    # Cyrillic, CJK, ...) survive instead of only ASCII a-z0-9 - a name like "मराठी" used
++    # to reduce to an empty slug and get rejected with a confusing 422.
++    normalized = unicodedata.normalize("NFKC", name.strip().lower())
++    slug = re.sub(r"[^\w]+", "-", normalized).replace("_", "-")
++    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+     if not slug:
+         raise HTTPException(status_code=422, detail="Community name must contain letters or numbers")
+     return slug
+@@ -133,7 +139,7 @@ def get_community_by_slug(
+     return _community_response(db, community, current_user)
+ 
+ 
+-@router.get("/{community_id}", response_model=schemas.CommunityOut)
++@router.get("/{community_id:int}", response_model=schemas.CommunityOut)
+ def get_community(
+     community_id: int,
+     db: Session = Depends(get_db),
+@@ -142,7 +148,7 @@ def get_community(
+     return _community_response(db, _get_community(db, community_id), current_user)
+ 
+ 
+-@router.post("/{community_id}/join", response_model=schemas.CommunityOut)
++@router.post("/{community_id:int}/join", response_model=schemas.CommunityOut)
+ def join_community(
+     community_id: int,
+     db: Session = Depends(get_db),
+@@ -160,7 +166,7 @@ def join_community(
+     return _community_response(db, community, current_user)
+ 
+ 
+-@router.delete("/{community_id}/join", status_code=status.HTTP_204_NO_CONTENT)
++@router.delete("/{community_id:int}/join", status_code=status.HTTP_204_NO_CONTENT)
+ def leave_community(
+     community_id: int,
+     db: Session = Depends(get_db),
+@@ -176,12 +182,13 @@ def leave_community(
+     db.commit()
+ 
+ 
+-@router.get("/{community_id}/members", response_model=list[schemas.UserOut])
++@router.get("/{community_id:int}/members", response_model=list[schemas.UserPublic])
+ def list_members(
+     community_id: int,
+     skip: int = Query(0, ge=0),
+     limit: int = Query(20, ge=1, le=100),
+     db: Session = Depends(get_db),
++    current_user: models.User = Depends(oauth2.get_current_user),
+ ):
+     _get_community(db, community_id)
+     return db.query(models.User).join(
+@@ -192,7 +199,7 @@ def list_members(
+     ).order_by(models.community_members.c.joined_at.asc(), models.User.id.asc()).offset(skip).limit(limit).all()
+ 
+ 
+-@router.get("/{community_id}/posts", response_model=list[schemas.PostOut])
++@router.get("/{community_id:int}/posts", response_model=list[schemas.PostOut])
+ def list_community_posts(
+     community_id: int,
+     sort: str = Query("new", pattern="^(new|top|hot)$"),
+diff --git a/routers/post.py b/routers/post.py
+index 1d7ea8a..793ecc7 100644
+--- a/routers/post.py
++++ b/routers/post.py
+@@ -9,7 +9,7 @@ from PIL import Image, UnidentifiedImageError
+ from app import models, schemas, storage
+ from app.database import get_db
+ from app.config import settings
+-from sqlalchemy.orm import Session
++from sqlalchemy.orm import Session, joinedload, selectinload
+ from routers import oauth2
+ from typing import Optional
+ from sqlalchemy import func
+@@ -45,7 +45,11 @@ async def _store_post_media(file: UploadFile) -> schemas.MediaUploadOut:
+                 image.verify()
+                 image_format = image.format
+                 width, height = image.size
+-        except (UnidentifiedImageError, OSError):
++        except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
++            # DecompressionBombError is a plain Exception (not an OSError) that Pillow
++            # raises for images whose decoded pixel count is disproportionate to their
++            # file size, e.g. a small PNG that unpacks to 14000x14000 pixels. It wasn't
++            # caught here, so such an upload surfaced as a 500 instead of a 422.
+             raise HTTPException(status_code=422, detail="Invalid image file")
+         if image_format not in ALLOWED_IMAGE_FORMATS:
+             raise HTTPException(status_code=422, detail="Only PNG, JPEG, and WebP images are supported")
+@@ -67,7 +71,7 @@ async def _store_post_media(file: UploadFile) -> schemas.MediaUploadOut:
+         media_type = "video"
+         mime_type = ALLOWED_VIDEO_EXTENSIONS[extension]
+ 
+-    filename = f"{uuid.uuid4().hex}.{extension}"
++    filename = f"{uuid.uuid4().hex}.{extension.lstrip('.')}"
+     storage.save_bytes(f"posts/{filename}", data, mime_type)
+     return schemas.MediaUploadOut(
+         url=f"/media/posts/{filename}",
+@@ -227,7 +231,7 @@ def delete_posts(id: int, db: Session = Depends(get_db),
+     db.commit()
+ 
+ @router.put("/{id}", status_code=status.HTTP_200_OK, response_model=schemas.Post)
+-def update_post(id: int, post: schemas.PostCreate, db: Session = Depends(get_db),
++def update_post(id: int, post: schemas.PostUpdate, db: Session = Depends(get_db),
+                 current_user: models.User = Depends(oauth2.get_current_user)):  
+     updated_post = db.query(models.Post).filter(models.Post.id == id).first()
+     if not updated_post:
+@@ -241,7 +245,11 @@ def update_post(id: int, post: schemas.PostCreate, db: Session = Depends(get_db)
+         updated_post.title = post.title.strip()
+     if post.content and post.content.strip():
+         updated_post.content = post.content.strip()
+-    updated_post.published = post.published
++    # PostUpdate.published defaults to None (unlike the old PostCreate-based schema,
++    # where the omitted field defaulted to True), so a caller that only sends {title}
++    # or {content} no longer silently re-publishes a draft.
++    if post.published is not None:
++        updated_post.published = post.published
+     
+     db.commit()
+     db.refresh(updated_post)
+@@ -250,33 +258,103 @@ def update_post(id: int, post: schemas.PostCreate, db: Session = Depends(get_db)
+     _ = updated_post.media
+     return updated_post
+ 
++def _optional_current_user(
++    token: Optional[str] = Depends(oauth2.optional_oauth2_scheme),
++    db: Session = Depends(get_db),
++) -> Optional[models.User]:
++    if not token:
++        return None
++    try:
++        credentials_exception = HTTPException(status_code=401, detail="Not valid credentials")
++        token_data = oauth2.verify_access_token(token, credentials_exception)
++    except HTTPException:
++        return None
++    return db.query(models.User).filter(models.User.id == token_data.id).first()
++
++
++def _hydrate_posts(db: Session, results: list) -> list[dict]:
++    """Attach `owner` and `media` to a list of (Post, votes) tuples with exactly one
++    extra query each, instead of the lazy-loaded relationship firing a fresh SELECT per
++    post (an N+1 query pattern that scales linearly with page size)."""
++    posts = [post for post, _ in results]
++    if posts:
++        loaded = db.query(models.Post).filter(
++            models.Post.id.in_([p.id for p in posts]),
++        ).options(joinedload(models.Post.owner), selectinload(models.Post.media)).all()
++        by_id = {p.id: p for p in loaded}
++        results = [(by_id[post.id], votes) for post, votes in results]
++    return [{"Post": post, "votes": votes} for post, votes in results]
++
++
++def _attach_voted(db: Session, items: list[dict], viewer: Optional[models.User]) -> list[dict]:
++    if viewer is None or not items:
++        return items
++    post_ids = [item["Post"].id for item in items]
++    voted_ids = {
++        row[0] for row in db.query(models.Vote.post_id).filter(
++            models.Vote.user_id == viewer.id,
++            models.Vote.post_id.in_(post_ids),
++        ).all()
++    }
++    for item in items:
++        item["voted"] = item["Post"].id in voted_ids
++    return items
++
++
+ @router.get("/", response_model=list[schemas.PostOut]) 
+ def get_posts(db: Session = Depends(get_db),
+-              limit: int = 10,
+-              skip: int = 0,
+-              search: Optional[str] = ""):
++              limit: int = Query(10, ge=1, le=100),
++              skip: int = Query(0, ge=0),
++              search: Optional[str] = "",
++              sort: str = Query("new", pattern="^(new|top)$"),
++              current_user: Optional[models.User] = Depends(_optional_current_user)):
++    vote_count = func.count(models.Vote.post_id)
+     query = (
+-        db.query(models.Post, func.count(models.Vote.post_id).label("votes"))
++        db.query(models.Post, vote_count.label("votes"))
+         .join(models.Vote, models.Vote.post_id == models.Post.id, isouter=True)
+         .filter(models.Post.published.is_(True))
+         .group_by(models.Post.id)
+     )
+     if search and search.strip():
+-        query = query.filter(models.Post.title.ilike(f"%{search.strip()}%"))
++        # Escape LIKE's own wildcard characters so a search for e.g. "50% off" or
++        # "file_name" doesn't have the % / _ treated as pattern wildcards and match
++        # posts that don't actually contain that text.
++        term = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
++        query = query.filter(models.Post.title.ilike(f"%{term}%", escape="\\"))
++    # Without an explicit order, Postgres doesn't guarantee row order across calls, so
++    # paging (skip/limit) could repeat or skip posts, and edited posts could visibly
++    # jump position between refreshes. The frontend already has a "Top" tab (FeedTabs)
++    # but had no way to ask the server for it, so it only ever re-sorted whichever 20
++    # posts were already loaded on the client - "Top" never saw older high-voted posts.
++    if sort == "top":
++        query = query.order_by(vote_count.desc(), models.Post.created_at.desc(), models.Post.id.desc())
++    else:
++        query = query.order_by(models.Post.created_at.desc(), models.Post.id.desc())
+     results = query.limit(limit).offset(skip).all()
+     # db.query(Post, votes) returns tuples, but response_model expects objects
+-    return [{"Post": post, "votes": votes} for post, votes in results]
++    items = _hydrate_posts(db, results)
++    return _attach_voted(db, items, current_user)
+ 
+ 
+ @router.get("/{post_id}", response_model=schemas.PostOut)
+-def get_post(post_id: int, db: Session = Depends(get_db)):
++def get_post(
++    post_id: int,
++    db: Session = Depends(get_db),
++    current_user: Optional[models.User] = Depends(_optional_current_user),
++):
+     result = db.query(models.Post, func.count(models.Vote.post_id).label("votes")).outerjoin(
+         models.Vote, models.Vote.post_id == models.Post.id,
+-    ).filter(models.Post.id == post_id, models.Post.published.is_(True)).group_by(models.Post.id).first()
++    ).filter(models.Post.id == post_id).group_by(models.Post.id).first()
+     if result is None:
+         raise HTTPException(status_code=404, detail="Post not found")
+     post, votes = result
+-    return {"Post": post, "votes": votes}
++    # A draft is visible to its owner (e.g. to preview it before publishing) but to
++    # no one else; this used to filter out unpublished posts unconditionally, so an
++    # owner opening their own draft got the same 404 as a stranger would.
++    if not post.published and (current_user is None or current_user.id != post.owner_id):
++        raise HTTPException(status_code=404, detail="Post not found")
++    items = _attach_voted(db, [{"Post": post, "votes": votes}], current_user)
++    return items[0]
+ 
+ 
+ @router.post("/{post_id}/share", response_model=schemas.ShareOut)
+@@ -316,6 +394,11 @@ def create_reply(
+     post = db.query(models.Post).filter(models.Post.id == post_id).first()
+     if post is None:
+         raise HTTPException(status_code=404, detail="Post not found")
++    # A draft isn't visible to anyone but its owner (see get_post), so it shouldn't be
++    # repliable by anyone else either - this previously let any authenticated user
++    # discover and comment on a post its owner hadn't published yet.
++    if not post.published and post.owner_id != current_user.id:
++        raise HTTPException(status_code=404, detail="Post not found")
+     content = reply.content.strip()
+     if not content:
+         raise HTTPException(status_code=422, detail="Reply content cannot be blank")
+diff --git a/routers/profile.py b/routers/profile.py
+index 68d0ace..8ebeade 100644
+--- a/routers/profile.py
++++ b/routers/profile.py
+@@ -171,7 +171,11 @@ async def upload_avatar(
+             image.verify()
+             image_format = image.format
+             width, height = image.size
+-    except (UnidentifiedImageError, OSError):
++    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
++        # DecompressionBombError is Pillow's guard against images whose *decoded* pixel
++        # count is huge relative to their file size (e.g. a tiny PNG that unpacks to a
++        # 14000x14000 bitmap). It's a plain Exception, not an OSError, so it wasn't being
++        # caught here and surfaced as a 500 instead of a normal 422 validation error.
+         raise HTTPException(status_code=422, detail="Invalid image file")
+     if image_format not in ALLOWED_AVATAR_FORMATS:
+         raise HTTPException(status_code=422, detail="Only PNG, JPEG, and WebP avatars are supported")
+@@ -301,11 +305,26 @@ def get_profile_likes(
+ 
+ 
+ def _profile_users(db: Session, target_id: int, following: bool, skip: int, limit: int):
+-    column = models.user_follows.c.following_id if following else models.user_follows.c.follower_id
+-    join_column = models.user_follows.c.follower_id if following else models.user_follows.c.following_id
+-    return db.query(models.User).join(models.user_follows, join_column == models.User.id).filter(
+-        column == target_id,
++    # following=True  -> people target_id follows: join on following_id, filter follower_id
++    # following=False -> people who follow target_id: join on follower_id, filter following_id
++    # (this was previously backwards, so /followers returned who the user follows and
++    # vice versa; it also crashed with a 500 whenever a listed user had no avatar_url,
++    # since PublicUser.avatar_url is required but the column is nullable)
++    if following:
++        join_column = models.user_follows.c.following_id
++        filter_column = models.user_follows.c.follower_id
++    else:
++        join_column = models.user_follows.c.follower_id
++        filter_column = models.user_follows.c.following_id
++    users = db.query(models.User).join(models.user_follows, join_column == models.User.id).filter(
++        filter_column == target_id,
+     ).order_by(models.user_follows.c.created_at.desc(), models.User.id.desc()).offset(skip).limit(limit).all()
++    return [
++        schemas.PublicUser(
++            id=u.id, username=u.username, display_name=u.display_name, avatar_url=_avatar_url(u),
++        )
++        for u in users
++    ]
+ 
+ 
+ @router.get("/{username}/followers", response_model=list[schemas.PublicUser])
+diff --git a/routers/user.py b/routers/user.py
+index eb65884..3299584 100644
+--- a/routers/user.py
++++ b/routers/user.py
+@@ -12,7 +12,7 @@ from routers.chat import manager
+ 
+ router = APIRouter(prefix="/users", tags=["Users"])
+ 
+-@router.get("/", response_model=list[schemas.UserOut])
++@router.get("/", response_model=list[schemas.UserPublic])
+ def get_all_users(
+     skip: int = Query(0, ge=0),
+     limit: int = Query(20, ge=1, le=100),
+@@ -52,7 +52,7 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+ def get_me(current_user: models.User = Depends(oauth2.get_current_user)):
+     return current_user
+ 
+-@router.get("/{id:int}", response_model=schemas.UserOut)
++@router.get("/{id:int}", response_model=schemas.UserPublic)
+ def get_user(
+     id: int,
+     db: Session = Depends(get_db),
+@@ -191,7 +191,7 @@ def get_follow_status(
+     return _get_follow_status(db, current_user.id, id)
+ 
+ 
+-@router.get("/{id:int}/followers", response_model=list[schemas.UserOut])
++@router.get("/{id:int}/followers", response_model=list[schemas.UserPublic])
+ def get_followers(
+     id: int,
+     skip: int = Query(0, ge=0),
+@@ -208,7 +208,7 @@ def get_followers(
+     ).order_by(models.user_follows.c.created_at.desc()).offset(skip).limit(limit).all()
+ 
+ 
+-@router.get("/{id:int}/following", response_model=list[schemas.UserOut])
++@router.get("/{id:int}/following", response_model=list[schemas.UserPublic])
+ def get_following(
+     id: int,
+     skip: int = Query(0, ge=0),
