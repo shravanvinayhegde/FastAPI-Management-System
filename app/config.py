@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     )
     s3_endpoint_url: Optional[str] = Field(
         default=None,
-        validation_alias=AliasChoices("S3_ENDPOINT_URL", "AWS_ENDPOINT_URL"),
+        validation_alias=AliasChoices("S3_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL"),
     )
     s3_access_key_id: Optional[str] = Field(
         default=None,

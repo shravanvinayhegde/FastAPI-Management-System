@@ -1,12 +1,15 @@
 from __future__ import annotations
-from botocore.config import Config
 
+import logging
 from functools import lru_cache
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from app.config import settings
+
+logger = logging.getLogger("voteflow.storage")
 
 
 class StorageError(RuntimeError):
@@ -23,6 +26,19 @@ def uses_object_storage() -> bool:
 
 @lru_cache
 def _client():
+    logger.info(
+        "S3 configuration: bucket_configured=%s access_key_configured=%s "
+        "secret_configured=%s endpoint_configured=%s region_configured=%s "
+        "bucket=%s region=%s endpoint=%s",
+        bool(settings.s3_bucket),
+        bool(settings.s3_access_key_id),
+        bool(settings.s3_secret_access_key),
+        bool(settings.s3_endpoint_url),
+        bool(settings.s3_region),
+        settings.s3_bucket or "<unset>",
+        settings.s3_region or "us-east-2",
+        settings.s3_endpoint_url or "<AWS default>",
+    )
     return boto3.client(
         "s3",
         region_name=settings.s3_region or "us-east-2",
@@ -45,6 +61,12 @@ def save_bytes(key: str, data: bytes, content_type: str) -> None:
                 ContentType=content_type,
             )
         except (BotoCoreError, ClientError) as exc:
+            logger.exception(
+                "S3 upload failed: bucket=%s key=%s content_type=%s",
+                settings.s3_bucket,
+                key,
+                content_type,
+            )
             raise StorageError("Object storage upload failed") from exc
         return
 
@@ -60,7 +82,24 @@ def delete_bytes(key: str) -> None:
         return
 
     if uses_object_storage():
-        _client().delete_object(Bucket=settings.s3_bucket, Key=key)
+        try:
+            _client().delete_object(Bucket=settings.s3_bucket, Key=key)
+        except ClientError as exc:
+            error_code = str(exc.response.get("Error", {}).get("Code", ""))
+            if error_code not in {"404", "NoSuchKey", "NotFound"}:
+                logger.exception(
+                    "S3 delete failed: bucket=%s key=%s",
+                    settings.s3_bucket,
+                    key,
+                )
+                raise StorageError("Object storage deletion failed") from exc
+        except BotoCoreError as exc:
+            logger.exception(
+                "S3 delete failed: bucket=%s key=%s",
+                settings.s3_bucket,
+                key,
+            )
+            raise StorageError("Object storage deletion failed") from exc
 
 
 def public_url(key: str) -> str:
