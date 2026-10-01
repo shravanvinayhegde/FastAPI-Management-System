@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,13 +29,31 @@ class Settings(BaseSettings):
 
     # Local disk fallback when S3/R2 env vars are unset. Public contract remains /media/...
     media_directory: Path = Path("media")
-    s3_bucket: Optional[str] = None
-    s3_region: Optional[str] = None
-    s3_endpoint_url: Optional[str] = None
-    s3_access_key_id: Optional[str] = None
-    s3_secret_access_key: Optional[str] = None
+    s3_bucket: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("S3_BUCKET", "AWS_S3_BUCKET", "AWS_BUCKET"),
+    )
+    s3_region: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"),
+    )
+    s3_endpoint_url: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("S3_ENDPOINT_URL", "AWS_ENDPOINT_URL"),
+    )
+    s3_access_key_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
+    )
+    s3_secret_access_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"),
+    )
     # Optional public base URL (e.g. R2 custom domain); defaults to s3_endpoint_url
-    s3_public_base_url: Optional[str] = None
+    s3_public_base_url: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("S3_PUBLIC_BASE_URL", "AWS_PUBLIC_BASE_URL"),
+    )
     max_image_upload_mb: int = 10
     max_video_upload_mb: int = 100
     max_image_dimension: int = 4096
