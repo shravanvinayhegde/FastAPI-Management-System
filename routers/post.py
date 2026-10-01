@@ -110,7 +110,10 @@ async def _store_post_media(file: UploadFile) -> schemas.MediaUploadOut:
         mime_type = ALLOWED_VIDEO_EXTENSIONS[extension]
 
     filename = f"{uuid.uuid4().hex}.{extension.lstrip('.')}"
-    storage.save_bytes(f"posts/{filename}", data, mime_type)
+    try:
+        storage.save_bytes(f"posts/{filename}", data, mime_type)
+    except storage.StorageError as exc:
+        raise HTTPException(status_code=503, detail="Media storage is unavailable") from exc
     return schemas.MediaUploadOut(
         url=f"/media/posts/{filename}",
         media_type=media_type,

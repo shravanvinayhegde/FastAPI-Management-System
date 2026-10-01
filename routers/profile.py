@@ -181,7 +181,10 @@ async def upload_avatar(
     filename = f"{uuid.uuid4().hex}.{ALLOWED_AVATAR_FORMATS[image_format]}"
     extension = ALLOWED_AVATAR_FORMATS[image_format]
     content_type = f"image/{extension}" if extension != "jpg" else "image/jpeg"
-    storage.save_bytes(f"avatars/{filename}", data, content_type)
+    try:
+        storage.save_bytes(f"avatars/{filename}", data, content_type)
+    except storage.StorageError as exc:
+        raise HTTPException(status_code=503, detail="Media storage is unavailable") from exc
     current_user.avatar_url = f"/media/avatars/{filename}"
     current_user.avatar_type = "uploaded"
     db.commit()

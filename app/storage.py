@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 from functools import lru_cache
+
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
 from app.config import settings
+
+
+class StorageError(RuntimeError):
+    pass
 
 
 def uses_object_storage() -> bool:
@@ -18,7 +24,7 @@ def uses_object_storage() -> bool:
 def _client():
     return boto3.client(
         "s3",
-        region_name=settings.s3_region or "auto",
+        region_name=settings.s3_region or ("auto" if settings.s3_endpoint_url else "us-east-1"),
         endpoint_url=settings.s3_endpoint_url,
         aws_access_key_id=settings.s3_access_key_id,
         aws_secret_access_key=settings.s3_secret_access_key,
@@ -27,12 +33,15 @@ def _client():
 
 def save_bytes(key: str, data: bytes, content_type: str) -> None:
     if uses_object_storage():
-        _client().put_object(
-            Bucket=settings.s3_bucket,
-            Key=key,
-            Body=data,
-            ContentType=content_type,
-        )
+        try:
+            _client().put_object(
+                Bucket=settings.s3_bucket,
+                Key=key,
+                Body=data,
+                ContentType=content_type,
+            )
+        except (BotoCoreError, ClientError) as exc:
+            raise StorageError("Object storage upload failed") from exc
         return
 
     path = settings.media_directory / key
