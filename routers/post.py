@@ -249,10 +249,18 @@ async def create_posts(
                 height=result.height,
             ))
         db.commit()
-        db.refresh(new_post)
-        _ = new_post.owner
-        _ = new_post.media
-        return new_post
+        created_post = (
+            db.query(models.Post)
+            .options(
+                joinedload(models.Post.owner),
+                selectinload(models.Post.media),
+            )
+            .filter(models.Post.id == new_post.id)
+            .first()
+        )
+        if created_post is None:
+            raise RuntimeError("Created post could not be reloaded")
+        return created_post
     except HTTPException:
         db.rollback()
         for key in stored_keys:
@@ -264,7 +272,7 @@ async def create_posts(
                     key,
                 )
         raise
-    except Exception:
+    except Exception as exc:
         db.rollback()
         for key in stored_keys:
             try:
@@ -275,8 +283,10 @@ async def create_posts(
                     key,
                 )
         logger.exception(
-            "Failed to create post with media: user_id=%s",
+            "Failed to create post with media: user_id=%s error_type=%s error=%s",
             current_user.id,
+            type(exc).__name__,
+            str(exc),
         )
         raise HTTPException(
             status_code=500,
