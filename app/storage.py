@@ -41,11 +41,13 @@ def save_bytes(key: str, data: bytes, content_type: str) -> None:
 
 
 def delete_bytes(key: str) -> None:
-    if uses_object_storage():
-        _client().delete_object(Bucket=settings.s3_bucket, Key=key)
+    local_path = settings.media_directory / key
+    if local_path.exists():
+        local_path.unlink()
         return
 
-    (settings.media_directory / key).unlink(missing_ok=True)
+    if uses_object_storage():
+        _client().delete_object(Bucket=settings.s3_bucket, Key=key)
 
 
 def public_url(key: str) -> str:
